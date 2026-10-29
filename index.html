@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FloodLens Baltimore · Storm Impact Briefing</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<!--
+  FLOODLENS BALTIMORE — live data sources (internet required):
+    Roads                      - MDOT SHA road centerlines (MD iMAP)
+    Neighborhoods + population - Open Baltimore CityView
+    Subwatersheds + beltway     - Morgan State CityCAT study (embedded)
+    Land cover (1 m)           - Chesapeake Conservancy via MD iMAP
+    Subwatershed population    - US Census 2020 (TIGERweb)
+    Streams                    - USGS NHD (StreamStats network)
+    FEMA flood zones (DFIRM)   - MD iMAP / MDE / FEMA
+    Building footprints        - MD iMAP
+    Fire, police, hospitals, cooling centers,
+    schools, nursing homes     - Baltimore CityView
+    Homeless shelters          - Open Baltimore
+    Metro/light rail + MTA bus stops - MD iMAP Transit
+    311 flooding reports (2010-2025) - Open Baltimore
+    Census socio-economics     - BNIA / US DOT BTS (ACS)
+  Flood depths remain the synthetic demo model until CityCAT rasters are wired in.
+-->
+<link rel="stylesheet" href="styles.css?v=hist17">
+</head>
+<body>
+<div class="topbar">
+  <div class="brand">FloodLens <small>Baltimore</small></div>
+  <div class="tagline">Where the next storm cuts the city off</div>
+</div>
+
+<div class="briefing">
+  <div class="head">Storm Impact Briefing</div>
+  <div class="sentence" id="sentence">Loading basemap…</div>
+  <div class="stats" id="stats"></div>
+</div>
+
+<div class="main">
+  <div class="mapcol">
+    <div id="map"></div>
+    <div id="spin" class="spin"><div class="sp"></div></div>
+    <div id="bldgHint" class="bldghint">🏠 Click any building for its flood depth, stories &amp; <b>basement-flood risk</b></div>
+    <div class="mapsearch">
+      <input id="addrInput" type="text" placeholder="Enter your address" />
+      <button id="addrBtn">Check</button>
+      <button id="pickBtn" title="Then click any point on the map to check if it floods">Pick point</button>
+      <button id="clearBtn" title="Clear the address, picked point and selected area">Clear</button>
+    </div>
+
+    <div class="lpanel" id="lpanel">
+      <div class="lp-head" id="lpToggle">Layers <span id="lpChev" class="panchev">▸</span></div>
+      <div class="lp-body" id="lpBody">
+        <div class="lp-sec">Flooding</div>
+        <label><input type="checkbox" id="lFlood" checked> Floodwater (modeled)
+          <span class="info" title="CityCAT-modeled maximum water depth on the ground (pluvial / rain-on-grid) for the storm or forecast chosen below (Beltway 10 m DEM).">i</span></label>
+        <div class="subs" id="floodSubs" style="display:block">
+          <div class="lpnote" style="margin-top:0">Scenario mode</div>
+          <div class="seg" id="floodMode"><button data-mode="design" class="on">Design storm</button><button data-mode="forecast">Forecast</button></div>
+
+          <div id="designPanel">
+            <div class="lpnote">Storm return period</div>
+            <div class="seg" id="rp"><button data-rp="10" class="on">10-year</button><button data-rp="100">100-year</button></div>
+            <div class="lpnote">Storm duration</div>
+            <div class="seg" id="dur"><button data-dur="1" class="on">1-hour</button><button data-dur="24">24-hour</button></div>
+          </div>
+
+          <div id="forecastPanel" style="display:none">
+            <div class="lpnote" style="margin-top:0"><b>1. Location</b> — type an address or use <b>Pick point</b> above, then it focuses the forecast there.
+              <span class="info" title="Use the address box or Pick point at the top of the map to choose where the rainfall is forecast. The results focus on that location.">i</span></div>
+            <div class="lpnote" id="fcLoc" style="margin-top:3px;color:#1c6ea4">No location chosen — forecast covers the whole Beltway.</div>
+
+            <div class="lpnote" style="margin-top:6px"><b>2. Forecast rainfall (inches)</b>
+              <span class="info" title="Enter the rainfall a weather forecast gives for this area. The map snaps to the nearest pre-computed CityCAT run for the duration and scales depth to your amount (pluvial / rain-on-grid demo).">i</span></div>
+            <div class="row" style="display:flex;gap:6px;align-items:center;margin-top:3px">
+              <input id="fcRain" type="number" min="0" max="12" step="0.1" value="3.3"
+                style="width:90px;padding:6px 8px;border:1px solid var(--line,#dbe4ec);border-radius:7px;font-size:13px">
+              <input id="fcRainRange" type="range" min="0" max="10" step="0.1" value="3.3" style="flex:1">
+            </div>
+            <div class="lpnote"><b>3. Over what duration</b></div>
+            <div class="seg" id="fcDur"><button data-fcdur="1" class="on">1-hour</button><button data-fcdur="24">24-hour</button></div>
+
+            <div class="lpnote" style="margin-top:6px"><b>4. Show results within</b>
+              <span class="info" title="How far around the chosen location to spotlight the flood results. Beltway shows the whole study area.">i</span></div>
+            <div class="seg" id="fcRad">
+              <button data-rad="0.5">½ mi</button>
+              <button data-rad="1" class="on">1 mi</button>
+              <button data-rad="2">2 mi</button>
+              <button data-rad="0">Beltway</button>
+            </div>
+
+            <button id="fcRun" style="width:100%;margin-top:8px;padding:9px;border:0;border-radius:8px;background:#0f3d5c;color:#fff;font-weight:700;cursor:pointer;font-size:13px">Show flood results</button>
+            <div class="lpnote" id="fcPending" style="margin-top:4px;color:#b4690a;display:none">Rainfall changed — click <b>Show flood results</b> to update the map.</div>
+
+            <div class="lpnote" id="fcNote" style="margin-top:6px"></div>
+
+            <div class="lpnote" style="margin-top:8px"><b>Water build-up over time</b> (illustrative)
+              <span class="info" title="Shows the water rising toward the modeled maximum over the storm. Illustrative build-up, not a time-stepped CityCAT run.">i</span></div>
+            <div class="row" style="display:flex;gap:6px;align-items:center;margin-top:3px">
+              <button id="fcPlay" class="an-btn" style="width:76px;padding:6px 4px;border:1px solid var(--line,#dbe4ec);background:#f4f8fb;border-radius:7px;cursor:pointer;font-size:12px">&#9654; Play</button>
+              <input id="fcAnim" type="range" min="0" max="100" value="100" style="flex:1">
+            </div>
+            <div class="lpnote" id="fcAnimNote" style="margin-top:3px">Showing the modeled maximum (100%).</div>
+          </div>
+
+          <div class="lpnote" style="margin-top:5px"><span class="rain" id="rainInfo" title="">–</span></div>
+        </div>
+        <label><input type="checkbox" id="lFema"> FEMA flood hazard
+          <span class="info" title="Official FEMA flood insurance zones (DFIRM, via MD iMAP). These map long-term flood risk zones — not a single storm.">i</span></label>
+        <div class="subs" id="femaSubs">
+          <div class="lpnote" style="margin-top:0"><span class="dotk" style="background:#00c5ff"></span> 100-year zone — 1% chance of flooding each year</div>
+          <div class="lpnote"><span class="dotk" style="background:#ff8000"></span> 500-year zone — 0.2% chance each year</div>
+          <div class="lpnote"><span class="dotk" style="background:#1a1a1a"></span> Floodway (black hatching) — must stay clear to carry deep, fast floodwater</div>
+          <div class="lpnote">Official FEMA DFIRM zones, drawn from MDE&#39;s map service.</div>
+        </div>
+        <label><input type="checkbox" id="lRoads"> Roads (passability)
+          <span class="info" title="The full MDOT SHA road network. With Floodwater on, each stretch is colored by modeled depth: green = passable (dry/shallow), yellow = caution (partial flooding), red (dashed) = restricted/closed (over 30 cm — enough to stall most cars).">i</span></label>
+
+        <div class="lp-sec">Green infrastructure</div>
+        <div class="seg gi" id="cond"><button data-cond="base" class="on">Off</button><button data-cond="gi">On</button></div>
+        <div class="lpnote">Model rain gardens, bioswales and other green infrastructure to see how much flooding they prevent in the storm above.</div>
+
+        <div class="lp-sec">311 reports (2010–2025)</div>
+        <label><input type="checkbox" id="l311fl"><span class="dotk" style="background:#d97706;border-radius:50%"></span> Flooded streets
+          <span class="info" title="Locations where residents called 311 to report a flooded street (Open Baltimore 311, 2010–2025 where available).">i</span></label>
+        <label><input type="checkbox" id="l311wb"><span class="dotk" style="background:#7c3aed;border-radius:50%"></span> Water in basement
+          <span class="info" title="Locations where residents called 311 to report water in their basement (Open Baltimore 311, 2010–2025 where available).">i</span></label>
+
+        <div class="lp-sec">Reported flooding (photos)</div>
+        <label><input type="checkbox" id="lReports"><span class="dotk" style="background:#c026d3;border-radius:50%"></span> Validated flood photos
+          <span class="info" title="Locations with real photos of past flooding (validated from social media & news). Click a point to see the photo(s); use the See all photos button when a location has more than one.">i</span></label>
+        <label><input type="checkbox" id="lSocial"><span class="dotk" style="background:#0891b2;border-radius:50%"></span> Social media &amp; newsletter reports
+          <span class="info" title="Flooded-street locations geocoded from social media and newsletters (includes YouTube flood videos).">i</span></label>
+        <label><input type="checkbox" id="lMyCoast"> MyCoast reports (mycoast.org/md)
+          <span class="info" title="All flood reports from the MyCoast citizen-science app for Maryland (mycoast.org/md) inside the Beltway. Each report is tagged coastal (high-tide/tidal) or inland (rainfall). Click a point for the photo(s), date, rainfall and original report.">i</span></label>
+        <div class="subs" id="mycSubs" style="display:none">
+          <div class="lpnote" style="margin-top:0"><span class="dotk" style="background:#2563eb;border-radius:50%"></span> Coastal / high-tide flooding</div>
+          <div class="lpnote"><span class="dotk" style="background:#d97706;border-radius:50%"></span> Inland (rainfall) flooding</div>
+          <div class="lpnote">Popups show the rainfall in the 24 h before the report where recorded.</div>
+        </div>
+        <label><input type="checkbox" id="lClosures"><span class="dotk" style="background:#b91c1c;border-radius:50%"></span> Flood-related road closures
+          <span class="info" title="Known City flood-related road closures (from City reports). Click a marker for the location.">i</span></label>
+
+        <div class="lp-sec">Historical flood likelihood</div>
+        <label><input type="checkbox" id="lHist"> Historical flood likelihood (data-driven)
+          <span class="info" title="Data-driven, NO hydraulic model. Each dot is a LOCAL spot (~110 m) where Baltimore 311 flooded-street reports happened (2010-present), matched to the rainfall at BWI that triggered them. Dots are colored by the rainfall at which flooding STARTS there, and resized by how often it floods. Pick a point / enter an address (ideally in Forecast mode) to get that exact spot's likelihood. Indicative & reporting-biased, not engineering-grade.">i</span></label>
+        <div class="subs" id="histSubs" style="display:none">
+          <div class="lpnote" style="margin-top:0">Each dot = a local spot with past 311 flooding. Bigger = floods more often. Color = rain needed to flood there:</div>
+          <div class="lpnote"><span class="dotk" style="background:#b91c1c;border-radius:50%"></span> Floods at light rain (&le; ~0.4&Prime;)</div>
+          <div class="lpnote"><span class="dotk" style="background:#f59e0b;border-radius:50%"></span> ~0.4&ndash;0.8&Prime;</div>
+          <div class="lpnote"><span class="dotk" style="background:#eab308;border-radius:50%"></span> ~0.8&ndash;1.5&Prime;</div>
+          <div class="lpnote"><span class="dotk" style="background:#64748b;border-radius:50%"></span> Needs heavier rain (&gt; ~1.5&Prime;)</div>
+          <div class="lpnote"><b>Pick a point</b> or enter an address to get that spot's local likelihood for your rainfall.</div>
+        </div>
+
+        <div class="lp-sec">Insurance claims (FEMA NFIP)</div>
+        <label><input type="checkbox" id="lClaims"> Flood-insurance claims by ZIP
+          <span class="info" title="FEMA National Flood Insurance Program (NFIP) paid flood-insurance claims, aggregated by ZIP code. FEMA redacts the exact location for privacy, so claims are shown per ZIP area (not as points). Click a ZIP for claim count, total paid and average water depth.">i</span></label>
+        <div class="subs" id="claimSubs" style="display:none">
+          <div class="lpnote" style="margin-top:0">Shaded by number of paid claims per ZIP:</div>
+          <div class="choroleg" style="display:block">
+            <div class="bar" style="background:linear-gradient(to right,#fee5d9,#fcae91,#fb6a4a,#de2d26,#a50f15)"></div>
+            <div class="lbl"><span>few</span><span>many</span></div>
+          </div>
+          <div class="lpnote">FEMA NFIP redacted claims (OpenFEMA). Location redacted to ZIP for privacy.</div>
+        </div>
+
+        <div class="lp-sec">Live conditions</div>
+        <label><input type="checkbox" id="lCameras"><span class="dotk" style="background:#0ea5e9;border-radius:50%"></span> Live traffic cameras
+          <span class="info" title="MDOT CHART live traffic cameras inside the Beltway. Click a camera to open its LIVE video feed in a new tab to see current road/flood conditions, with the feed timestamp. Live view only — MDOT keeps no history; image quality is set by MDOT.">i</span></label>
+        <label><input type="checkbox" id="lWeather"><span class="dotk" style="background:#0d9488;border-radius:50%"></span> CHART weather stations (precip)
+          <span class="info" title="MDOT CHART roadway weather stations (RWIS) inside the Beltway. Click a station for its current precipitation status, air temp, humidity, wind and the reading time. Note: CHART reports precipitation type (rain/none), not amount in inches.">i</span></label>
+        <label><input type="checkbox" id="lNoaa"><span class="dotk" style="background:#6d28d9;border-radius:50%"></span> NOAA/NWS weather (BWI, Harbor)
+          <span class="info" title="Live NOAA/National Weather Service observations at BWI Airport, the Inner Harbor and Martin State. Click for current precipitation (inches, last 1/3/6 h), temperature, humidity and observation time. Updates live each time the app is opened.">i</span></label>
+        <label><input type="checkbox" id="lUsgs"><span class="dotk" style="background:#0369a1;border-radius:50%"></span> USGS stream gauges (live)
+          <span class="info" title="Live USGS stream gauges inside the study area. Click a gauge for current gage height (ft) and streamflow with the reading time. Updates live each time the app is opened.">i</span></label>
+
+        <div class="lp-sec">Buildings</div>
+        <label><input type="checkbox" id="lBldg" checked> Building footprints
+          <span class="info" title="Building footprints for the whole beltway (MD iMAP base layer at every zoom). Zoom in and buildings become clickable; in modeled floodwater they are colored by depth: yellow under 1 ft, orange 1–3 ft, red over 3 ft.">i</span></label>
+        <div class="lpnote" id="bldgNote"></div>
+
+        <div class="lp-sec">Boundaries</div>
+        <label><input type="checkbox" id="lNb"> Neighborhoods
+          <span class="info" title="Baltimore neighborhood boundaries with population (Open Baltimore).">i</span></label>
+        <label><input type="checkbox" id="lWs"> Subwatersheds
+          <span class="info" title="Subwatersheds of the Baltimore Beltway study area — the land areas that drain to each stream. Hover one for its population and land cover.">i</span></label>
+        <label><input type="checkbox" id="lStreams"><span class="dotk" style="background:#d8392b"></span> Streams (USGS)
+          <span class="info" title="Stream flowlines from the USGS National Hydrography Dataset — the same network StreamStats (streamstats.usgs.gov) uses. Drawn as clean red lines (no flow arrows or gauge points) and clipped to the Beltway study area.">i</span></label>
+        <label><input type="checkbox" id="lStreamGrid"><span class="dotk" style="background:#7c3aed"></span> StreamStats grid (raster)
+          <span class="info" title="USGS StreamStats stream-cell grid (the drainage network raster used to delineate watersheds), prepared from the local streamgrid GeoTIFF and shown as a purple raster overlay clipped to the Beltway (purple so it doesn't clash with the blue flood water).">i</span></label>
+
+        <div class="lp-sec">Environment</div>
+        <label><input type="checkbox" id="lLand"> Land cover (1 m)
+          <span class="info" title="Chesapeake Conservancy 1 m high-resolution land cover, via MD iMAP.">i</span></label>
+        <div class="subs" id="lcSubs">
+          <div class="lpnote"><span class="dotk" style="background:#267300"></span> Tree canopy &nbsp; <span class="dotk" style="background:#a3ff73"></span> Low vegetation</div>
+          <div class="lpnote"><span class="dotk" style="background:#9c9c9c"></span> Impervious / paved &nbsp; <span class="dotk" style="background:#ff0000"></span> Buildings</div>
+          <div class="lpnote"><span class="dotk" style="background:#00c5ff"></span> Water &nbsp; <span class="dotk" style="background:#00a884"></span> Wetlands</div>
+        </div>
+        <label><input type="checkbox" id="lSoil"> Soil (SSURGO)
+          <span class="info" title="USDA NRCS SSURGO soil map units, via MD iMAP. Hover a neighborhood or subwatershed for its dominant hydrologic soil group (A–D).">i</span></label>
+        <div class="subs" id="soilSubs">
+          <div class="lpnote" style="margin-top:0">Hydrologic soil groups (runoff potential):</div>
+          <div class="lpnote"><span class="dotk" style="background:#2c7fb8"></span> A — sandy, drains fast (low runoff)</div>
+          <div class="lpnote"><span class="dotk" style="background:#7fcdbb"></span> B — loamy (moderate runoff)</div>
+          <div class="lpnote"><span class="dotk" style="background:#fdae61"></span> C — clay loam (high runoff)</div>
+          <div class="lpnote"><span class="dotk" style="background:#d7191c"></span> D — clay / impervious (very high runoff)</div>
+          <div class="lpnote">USDA NRCS SSURGO. Hover a neighborhood or subwatershed for its dominant group.</div>
+        </div>
+
+        <div class="lp-sec">Socio-economic</div>
+        <select id="choroSel">
+          <option value="none">None</option>
+          <option value="income">Median household income</option>
+          <option value="kids">% children (under 18)</option>
+          <option value="old">% seniors (65+)</option>
+          <option value="pov">% households in poverty</option>
+          <option value="walk">% who walk to work</option>
+          <option value="bus">% public transit to work</option>
+          <option value="car">% who drive to work</option>
+        </select>
+        <div class="choroleg" id="choroLeg">
+          <div class="bar"></div>
+          <div class="lbl"><span id="clMin"></span><span id="clMax"></span></div>
+        </div>
+
+        <div class="lp-sec">Infrastructure</div>
+        <label><input type="checkbox" id="lInfra"> Show infrastructure
+          <span class="info" title="Turn on, then choose which facilities to display. When the Floodwater layer is on, markers turn red if the facility is flooded and amber if it sits in a cut-off area.">i</span></label>
+        <div class="subs" id="infraSubs">
+          <label><input type="checkbox" data-inf="fire"> Fire stations
+            <span class="info" title="Baltimore City fire stations (CityView).">i</span></label>
+          <label><input type="checkbox" data-inf="police"> Police stations
+            <span class="info" title="Baltimore City police stations (CityView).">i</span></label>
+          <label><input type="checkbox" data-inf="hosp"> Hospitals
+            <span class="info" title="Hospitals (Baltimore CityView dataset — point locations are approximate).">i</span></label>
+          <label><input type="checkbox" data-inf="cool"> Cooling centers
+            <span class="info" title="Official Baltimore City cooling / Code Red centers.">i</span></label>
+          <label><input type="checkbox" data-inf="nurse"> Nursing homes
+            <span class="info" title="Licensed nursing homes in Baltimore City (CityView).">i</span></label>
+          <label><input type="checkbox" data-inf="shel"> Homeless shelters
+            <span class="info" title="Homeless shelters and transitional housing (Open Baltimore).">i</span></label>
+          <label><input type="checkbox" data-inf="schPub"> Public schools
+            <span class="info" title="Baltimore City public schools (CityView).">i</span></label>
+          <label><input type="checkbox" data-inf="schCh"> Charter schools
+            <span class="info" title="Charter schools, identified from the city public-school dataset where flagged.">i</span></label>
+          <label><input type="checkbox" data-inf="schInd"> Independent schools
+            <span class="info" title="Private / independent schools (CityView).">i</span></label>
+          <label><input type="checkbox" data-inf="rail"> Metro &amp; light rail stations
+            <span class="info" title="Baltimore Metro SubwayLink and Light RailLink stations (MDOT MTA via MD iMAP).">i</span></label>
+          <label><input type="checkbox" data-inf="bus"> Bus stops (MTA)
+            <span class="info" title="MDOT MTA bus stops. Loads for the visible area when you zoom in.">i</span></label>
+          <div class="lpnote" id="infNote"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="cursordepth" id="curDepth"></div>
+
+    <div class="bmctl" id="bmCtl">
+      <div class="bmopt on" data-bm="streets"><img src="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/12/1561/1176" alt=""><span>Streets</span></div>
+      <div class="bmopt" data-bm="sat"><img src="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/12/1561/1176" alt=""><span>Satellite</span></div>
+    </div>
+
+    <div class="legend" id="legend">
+      <div class="leg-head" id="legToggle">Legend <span id="legChev" class="panchev">▸</span></div>
+      <div class="leg-body" id="legBody">
+      <div class="legrow">
+        <div class="cbar">
+          <div class="bar"></div>
+          <div class="ticks"><span>&gt;2</span><span>1.6</span><span>1.2</span><span>0.8</span><span>0.4</span><span>0</span></div>
+          <div class="axis">Water depth (m)</div>
+        </div>
+        <div class="key">
+          <div class="legttl">Road passability (with Floodwater on)</div>
+          <div class="r"><span class="sw" style="border-top:3px solid #16a34a;background:none;height:3px"></span> passable &mdash; no flooding</div>
+          <div class="r"><span class="sw" style="border-top:3px solid #d4a017;background:none;height:3px"></span> caution &mdash; shallow (under 1 m)</div>
+          <div class="r"><span class="sw" style="border-top:3px dashed #dc2626;background:none;height:3px"></span> deep &mdash; restricted / closed (1 m+)</div>
+          <div class="legttl">Buildings</div>
+          <div class="r"><span class="sw" style="background:var(--bminor)"></span> flooded &lt; 1 ft</div>
+          <div class="r"><span class="sw" style="background:var(--bmod)"></span> flooded 1–3 ft</div>
+          <div class="r"><span class="sw" style="background:var(--bsev)"></span> flooded &gt; 3 ft</div>
+          <div class="legexp" id="bldgList"></div>
+        </div>
+      </div>
+      </div>
+    </div>
+  </div>
+  <aside class="side" id="side">
+    <h3 id="sideToggle">Emergency facility coverage <span id="sideChev" class="panchev">▸</span>
+      <span class="info" title="Red = the facility itself is flooded in this scenario. Turn on the Floodwater layer to evaluate.">i</span>
+      <button id="facToggle" class="chev">Show all &#9662;</button></h3>
+    <div id="sideBody">
+      <div class="lpnote" id="facCount"></div>
+      <div id="stnList"></div>
+      <div class="gibox" id="gibox"></div>
+    </div>
+  </aside>
+</div>
+
+<div class="modal on" id="welcome">
+  <div class="wsheet">
+    <div class="wbd">
+      <div class="wk">FLOODLENS BALTIMORE</div>
+      <h2>Welcome to FloodLens Baltimore</h2>
+      <p>FloodLens is to help residents, community organizations, stakeholders, and public agencies across Baltimore City and the communities within the Baltimore Beltway understand where storms flood streets, homes, and neighborhoods, and who is most exposed.</p>
+      <p>This tool is part of the Baltimore Social-Environmental Collaborative (BSEC) and the Mid-Atlantic Regional Integrated Sciences and Assessments (MARISA) project, and was developed by Civil Engineering researchers at Morgan State University in Dr. James Hunter&#39;s lab.</p>
+      <p class="wsmall">Every effort has been made to ensure the accuracy of the data presented. It is provided for informational purposes only, and the researchers do not assume any liability arising from its use. Additional data may be obtained from the FEMA Map Service Center.</p>
+      <div class="wbtns">
+        <button class="wbtn" id="wClose">CLOSE</button>
+      </div>
+    </div>
+    <div class="wimg" aria-hidden="true">
+      <img id="wImg" src="high-water-frederick-2.jpg" alt="A car sitting in high floodwater on a flooded street (Frederick, MD)" />
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="galModal">
+  <div class="galsheet">
+    <div class="hd"><div><b id="galTitle">Reported flooding</b><div id="galSub"></div></div><span class="x" id="galClose">×</span></div>
+    <div id="galImgs"></div>
+    <div id="galCredit"></div>
+  </div>
+</div>
+
+<script src="data/images.js"></script>
+<script src="data/geo.js"></script>
+<script src="data/streamgrid.js"></script>
+<script src="data/flood.js"></script>
+<script src="data/reports.js"></script>
+<script src="data/cameras.js"></script>
+<script src="data/claims.js"></script>
+<script src="data/stations.js"></script>
+<script src="data/floodhist.js?v=hist17"></script>
+<script src="data/streamcells.js?v=hist17"></script>
+<script src="app.js?v=hist17"></script>
+</body>
+</html>

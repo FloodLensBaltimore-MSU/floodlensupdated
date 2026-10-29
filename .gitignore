@@ -1,0 +1,8 @@
+*.exe
+_BACKUP_*/
+*.bak*
+*.streambak
+__pycache__/
+*.docx
+Thumbs.db
+.DS_Store
