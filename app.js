@@ -1547,9 +1547,10 @@
   // Combined basement-flood risk: surface water on the street + home freeboard (elevation above
   // the local low point) + stream proximity + basement presence. Baltimore rowhomes often sit
   // raised, so even a flooded street may not reach the basement -> freeboard lowers the risk.
-  async function basementRisk(lat,lng,depthM,bg){
+  // pure scoring (no network): given already-fetched elevation + stream, compute basement risk
+  function _basementScore(depthM, geo, bg){
     const inch=depthM*39.3701;
-    const [homeEl,lowEl,stream]=await Promise.all([elevationM(lat,lng),lowNearbyElevM(lat,lng),nearestStreamMi(lat,lng)]);
+    const homeEl=geo.homeEl, lowEl=geo.lowEl, stream=geo.stream;
     let freeboardFt=null;
     if(homeEl!=null&&lowEl!=null)freeboardFt=(homeEl-lowEl)*3.281; // how high the house sits vs the low point
     const streamMi=(stream&&stream.mi!=null)?stream.mi:null;      // null = unknown / none within ~1 km
@@ -1584,24 +1585,103 @@
     return {risk,rcol,na,inch,freeboardFt,streamMi,streamM,streamName:(stream&&stream.name)||"",
             streamSrc:(stream&&stream.src)||"",nearStream,homeEl,lowEl};
   }
-  // building popup HTML: flood depth + stories/year/use + basement + basement-flood risk
-  async function buildingPopupHTML(lat,lng,depthM){
+  // network part only: fetch elevation (home + full 5-point ring) + nearest stream, all in parallel
+  async function basementGeo(lat,lng){
+    const [homeEl,lowEl,stream]=await Promise.all([elevationM(lat,lng),lowNearbyElevM(lat,lng),nearestStreamMi(lat,lng)]);
+    return {homeEl,lowEl,stream};
+  }
+  // ground elevation (ft above sea level) + a plain "high / low ground" hint for the Beltway area
+  function elevationLine(homeEl){
+    if(homeEl==null)return "";
+    const ft=homeEl*3.28084;
+    let tag,col;
+    if(ft>=120){tag=" \u2014 relatively high ground";col="#16a34a";}
+    else if(ft<=15){tag=" \u2014 low-lying ground";col="#b45309";}
+    else {tag=" \u2014 mid-level ground";col="#64748b";}
+    const arrow=ft>=120?"\u25b2 ":(ft<=15?"\u25bc ":"");
+    return '<div style="font-size:11px;color:'+col+';margin-top:2px">'+arrow+'Ground elevation: <b>'+Math.round(ft)+
+           ' ft</b> ('+homeEl.toFixed(1)+' m) above sea level'+tag+'</div>';
+  }
+  // self-contained SVG "street view" cross-section: house + curb + first step, water filled to the
+  // modeled height, a person for scale, plus a plain-language caption of how high the water gets.
+  function floodDiagramSVG(depthM){
+    const inch=depthM*39.3701, ft=depthM*3.28084, ftVis=5.0, groundY=120;
+    const wTopPx=Math.max(0,Math.min(groundY-6,(Math.min(ft,ftVis)/ftVis)*(groundY-6)));
+    const waterY=groundY-wTopPx;
+    let cap,ccol="#08519c";
+    if(inch<1){cap="Essentially dry \u2014 just a sheen on the pavement.";ccol="#16a34a";}
+    else if(inch<4){cap="Ankle-deep \u2014 covers the curb and street gutter.";}
+    else if(inch<9){cap="Up to the first step \u2014 shin to knee deep at the curb.";}
+    else if(inch<18){cap="Knee-deep \u2014 reaches the doorstep / threshold.";ccol="#b45309";}
+    else if(inch<36){cap="Waist-deep \u2014 at or over the front door.";ccol="#c2410c";}
+    else {cap="Over 3 ft \u2014 toward first-floor windows; cars float.";ccol="#b91c1c";}
+    const s='<svg width="230" height="140" viewBox="0 0 230 140" style="display:block;margin:4px auto 0;border:1px solid #e2e8f0;border-radius:6px;background:#eef4f8">'+
+      '<rect x="128" y="34" width="78" height="86" fill="#d9c7b0" stroke="#b7a689"/>'+
+      '<polygon points="124,34 167,12 210,34" fill="#9c6b4b"/>'+
+      '<rect x="150" y="60" width="18" height="18" fill="#bcd3e6" stroke="#8aa9c0"/>'+
+      '<rect x="178" y="84" width="16" height="36" fill="#7b5a3a"/>'+
+      '<rect x="150" y="'+(groundY-10)+'" width="56" height="10" fill="#c9ccd1" stroke="#aab0b6"/>'+
+      '<rect x="0" y="'+groundY+'" width="230" height="20" fill="#9aa0a6"/>'+
+      '<rect x="112" y="'+(groundY-6)+'" width="10" height="6" fill="#c9ccd1" stroke="#aab0b6"/>'+
+      '<g stroke="#37434d" stroke-width="3" fill="none" stroke-linecap="round">'+
+        '<circle cx="70" cy="'+(groundY-46)+'" r="6" fill="#37434d" stroke="none"/>'+
+        '<line x1="70" y1="'+(groundY-40)+'" x2="70" y2="'+(groundY-16)+'"/>'+
+        '<line x1="70" y1="'+(groundY-32)+'" x2="60" y2="'+(groundY-22)+'"/>'+
+        '<line x1="70" y1="'+(groundY-32)+'" x2="80" y2="'+(groundY-22)+'"/>'+
+        '<line x1="70" y1="'+(groundY-16)+'" x2="62" y2="'+groundY+'"/>'+
+        '<line x1="70" y1="'+(groundY-16)+'" x2="78" y2="'+groundY+'"/>'+
+      '</g>'+
+      (ft>0.02?('<rect x="0" y="'+waterY+'" width="230" height="'+(groundY+20-waterY)+'" fill="#2b83c6" fill-opacity="0.45"/>'+
+                '<line x1="0" y1="'+waterY+'" x2="230" y2="'+waterY+'" stroke="#1b5e92" stroke-width="2"/>'):'')+
+      '<text x="6" y="14" font-size="11" fill="#0f3d5c" font-weight="700">Water \u2248 '+(ft>0?ft.toFixed(1):"0")+' ft</text>'+
+      '</svg>';
+    return s+'<div style="font-size:11px;color:'+ccol+';margin:2px 2px 0;text-align:center">'+cap+'</div>';
+  }
+  // building popup HTML, progressively filled. onPartial(html) paints the instant stages so the
+  // popup never looks frozen; the returned promise resolves with the FULL html once the slow
+  // elevation/stream lookups finish. The parcel lookup and elevation/stream run IN PARALLEL.
+  async function buildingPopupHTML(lat,lng,depthM,onPartial){
     const inch=depthM*39.3701;
-    const a=await fetchBuildingInfo(lat,lng);
+    const pInfo=fetchBuildingInfo(lat,lng);   // parcel lookup  \  fired together,
+    const pGeo=basementGeo(lat,lng);          // elev + stream  /  run in parallel
+    // header block (instant): flood depth + the street-view water diagram
+    const headHTML=()=>{
+      let h='<div style="min-width:230px"><b>Building</b>';
+      h+='<div style="margin:3px 0"><b>Street flood depth here: </b>'+
+        (depthM>=0.10?('<span style="color:#08519c;font-weight:700">'+depthM.toFixed(2)+' m / '+inch.toFixed(1)+' in</span>')
+                    :'<span style="color:#16a34a">essentially dry</span>')+'</div>';
+      h+=floodDiagramSVG(depthM)+
+         '<div style="font-size:10px;color:#94a3b8;text-align:center;margin-top:1px">Illustrative cross-section (person \u2248 6 ft for scale)</div>';
+      return h;
+    };
+    // STAGE 1 (instant): show depth + diagram immediately
+    if(typeof onPartial==="function")
+      onPartial(headHTML()+'<div style="font-size:11px;color:#94a3b8;margin-top:6px">Loading building &amp; elevation details\u2026</div></div>');
+    // STAGE 2: parcel details as soon as they arrive (not waiting on elevation)
+    const a=await pInfo;
     const bg=basementGuess(a);
-    const br=await basementRisk(lat,lng,depthM,bg);   // elevation + stream + surface water
-    let h='<div style="min-width:220px"><b>Building</b>';
-    h+='<div style="margin:3px 0"><b>Street flood depth here: </b>'+
-      (depthM>=0.10?('<span style="color:#08519c;font-weight:700">'+depthM.toFixed(2)+' m / '+inch.toFixed(1)+' in</span>')
-                  :'<span style="color:#16a34a">essentially dry</span>')+'</div>';
+    const parcelHTML=()=>{
+      let h='<div style="margin-top:4px;padding-top:4px;border-top:1px solid #e2e8f0">';
+      if(a){
+        const st=(a.BLDG_STORY!=null&&a.BLDG_STORY!=="")?a.BLDG_STORY:"\u2014";
+        h+='Stories: <b>'+st+'</b>'+(a.BLDG_UNITS?(" \u00b7 units: "+a.BLDG_UNITS):"")+'<br>';
+        if(a.YEARBLT&&+a.YEARBLT>0)h+='Year built: '+a.YEARBLT+'<br>';
+        if(a.DESCLU)h+='Use: '+a.DESCLU+'<br>';
+      }else{h+='No parcel record found at this point.<br>';}
+      h+='Basement: <b>'+bg.txt+'</b></div>';
+      return h;
+    };
+    if(typeof onPartial==="function")
+      onPartial(headHTML()+parcelHTML()+'<div style="font-size:11px;color:#94a3b8;margin-top:4px">Loading elevation &amp; stream details\u2026</div></div>');
+    // STAGE 3 (full): elevation + stream + basement-flood risk
+    const geo=await pGeo;
+    const br=_basementScore(depthM,geo,bg);
+    const svLink='https://www.google.com/maps/@?api=1&amp;map_action=pano&amp;viewpoint='+lat.toFixed(6)+','+lng.toFixed(6);
+    let h=headHTML()+parcelHTML();
+    // ground elevation of the building (high vs low ground)
     h+='<div style="margin-top:4px;padding-top:4px;border-top:1px solid #e2e8f0">';
-    if(a){
-      const st=(a.BLDG_STORY!=null&&a.BLDG_STORY!=="")?a.BLDG_STORY:"\u2014";
-      h+='Stories: <b>'+st+'</b>'+(a.BLDG_UNITS?(" \u00b7 units: "+a.BLDG_UNITS):"")+'<br>';
-      if(a.YEARBLT&&+a.YEARBLT>0)h+='Year built: '+a.YEARBLT+'<br>';
-      if(a.DESCLU)h+='Use: '+a.DESCLU+'<br>';
-    }else{h+='No parcel record found at this point.<br>';}
-    h+='Basement: <b>'+bg.txt+'</b></div>';
+    h+=elevationLine(geo.homeEl);
+    h+='</div>';
     // basement-flood risk + WHY (freeboard / stream / surface water)
     h+='<div style="margin-top:4px;padding-top:4px;border-top:1px solid #e2e8f0">';
     h+='<b>Basement-flood risk: </b><span style="display:inline-block;padding:1px 7px;border-radius:9px;color:#fff;font-weight:700;background:'+br.rcol+'">'+br.risk+'</span>';
@@ -1634,6 +1714,11 @@
       else if(inch>=6)h+='<div style="font-size:11px;color:#5d6b78;margin-top:2px">Water &gt;6 in can enter at doorways/thresholds.</div>';
     }
     h+='</div>';
+    // real-world street view of this exact spot (free Google Street View deep-link, no API key)
+    h+='<div style="margin-top:5px"><a href="'+svLink+'" target="_blank" rel="noopener" '+
+       'style="display:inline-block;padding:4px 9px;border-radius:7px;background:#1a73e8;color:#fff;'+
+       'font-weight:700;font-size:11px;text-decoration:none">\ud83d\udc41 See this spot in Street View</a>'+
+       '<div style="font-size:10px;color:#94a3b8;margin-top:2px">Opens Google Street View so you can picture how high the water reaches in real life.</div></div>';
     h+='<div style="margin-top:4px;font-size:10px;color:#94a3b8">Risk blends modeled street water, home elevation (USGS 3DEP), stream proximity (USGS NHD + StreamStats grid) and likely basement presence. Indicative estimate from public data, not engineering-grade.</div></div>';
     return h;
   }
@@ -1679,9 +1764,10 @@
           const ctr=r.ctr||fCentroid(f); if(!ctr){l.setPopupContent("No location for this building.");return;}
           const dep=r.d!=null?r.d:(show.flood?depthLL(ctr[0],ctr[1]):0);
           const pop=ev.popup;
-          buildingPopupHTML(ctr[0],ctr[1],dep)
-            .then(html=>{pop.setContent(html);})
-            .catch(e=>{pop.setContent('<b>Building</b><br>Street flood depth: '+(dep*39.3701).toFixed(1)+' in.<br>'+
+          const put=html=>{if(pop.isOpen&&!pop.isOpen())return;pop.setContent(html);};
+          buildingPopupHTML(ctr[0],ctr[1],dep,put)   // progressive: paints as each stage arrives
+            .then(put)
+            .catch(e=>{put('<b>Building</b><br>Street flood depth: '+(dep*39.3701).toFixed(1)+' in.<br>'+
               '<span style="color:#b45309">Could not load full building details (needs internet for parcel + elevation data).</span>');});
         });
         }
@@ -2867,9 +2953,10 @@
     const ctr=nb.ctr, dep=(show.flood?buildingFloodDepth(nb.f):0);  // shared strict footprint test
     const pop=L.popup({maxWidth:270}).setLatLng([ctr[0],ctr[1]])
       .setContent("Loading building details\u2026").openOn(map);
-    buildingPopupHTML(ctr[0],ctr[1],dep)
-      .then(html=>pop.setContent(html))
-      .catch(()=>pop.setContent('<b>Building</b><br>Street flood depth: '+(dep*39.3701).toFixed(1)+
+    const put=html=>{if(pop.isOpen&&!pop.isOpen())return;pop.setContent(html);};
+    buildingPopupHTML(ctr[0],ctr[1],dep,put)   // progressive: paints as each stage arrives
+      .then(put)
+      .catch(()=>put('<b>Building</b><br>Street flood depth: '+(dep*39.3701).toFixed(1)+
         ' in.<br><span style="color:#b45309">Could not load full details (needs internet).</span>'));
   });
   // ----- clear button: address marker, picked point, and any selected area -----
