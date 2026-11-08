@@ -1602,46 +1602,14 @@
     return '<div style="font-size:11px;color:'+col+';margin-top:2px">'+arrow+'Ground elevation: <b>'+Math.round(ft)+
            ' ft</b> ('+homeEl.toFixed(1)+' m) above sea level'+tag+'</div>';
   }
-  // plain-language description of how high the predicted water gets (text only, no illustration)
-  function floodDepthCaption(depthM){
-    const inch=depthM*39.3701; let cap,ccol="#08519c";
-    if(inch<1){cap="essentially dry \u2014 just a sheen on the pavement";ccol="#16a34a";}
-    else if(inch<4){cap="ankle-deep \u2014 covers the curb and street gutter";}
-    else if(inch<9){cap="up to the first step \u2014 shin-to-knee deep at the curb";}
-    else if(inch<18){cap="knee-deep \u2014 reaches the doorstep / threshold";ccol="#b45309";}
-    else if(inch<36){cap="waist-deep \u2014 at or over the front door";ccol="#c2410c";}
-    else {cap="over 3 ft \u2014 toward first-floor windows; cars float";ccol="#b91c1c";}
-    return {cap,ccol};
+  // drop a distinct pin on the building the user clicked (stays until Clear or a new click)
+  let bldgMarker=null;
+  function markClickedBuilding(lat,lng){
+    if(bldgMarker){try{map.removeLayer(bldgMarker);}catch(e){}bldgMarker=null;}
+    const icon=L.divIcon({className:"",iconSize:[30,38],iconAnchor:[15,36],
+      html:'<div class="bldgpin" title="The building you clicked">\ud83c\udfe0</div>'});
+    bldgMarker=L.marker([lat,lng],{icon,zIndexOffset:1000,interactive:false}).addTo(map);
   }
-  // ---- in-tool Street View: embeds REAL Google Street View at the clicked spot (keyless, no cost)
-  // and overlays the predicted water level on the real imagery. Called from the building popup.
-  function openStreetView(lat,lng,depthM){
-    const modal=document.getElementById("svModal"); if(!modal)return;
-    const ft=depthM*3.28084, inch=depthM*39.3701, cc=floodDepthCaption(depthM);
-    // real Street View panorama embed (output=svembed), framed toward the clicked point
-    const src="https://maps.google.com/maps?q=&layer=c&cbll="+lat.toFixed(6)+","+lng.toFixed(6)+
-              "&cbp=11,0,0,0,0&output=svembed";
-    const frame=document.getElementById("svFrame");
-    if(frame)frame.src=src;
-    // water overlay: height as a fraction of the view (approximate; 12 ft ~ 48% up the image)
-    const frac=Math.max(0, Math.min(0.55, (ft/12)*0.48));
-    const band=document.getElementById("svWater");
-    if(band){
-      if(ft>0.02){ band.style.display="block"; band.style.height=(frac*100).toFixed(1)+"%"; }
-      else band.style.display="none";
-    }
-    const lab=document.getElementById("svWaterLab");
-    if(lab)lab.innerHTML= ft>0.02
-      ? ('Predicted water \u2248 <b>'+ft.toFixed(1)+' ft</b> ('+inch.toFixed(0)+' in) \u2014 '+cc.cap)
-      : 'Essentially dry in this scenario \u2014 no significant water predicted here.';
-    const coord=document.getElementById("svCoord");
-    if(coord)coord.textContent=lat.toFixed(5)+", "+lng.toFixed(5);
-    const gm=document.getElementById("svOpenMaps");
-    if(gm)gm.href="https://www.google.com/maps/@?api=1&map_action=pano&viewpoint="+lat.toFixed(6)+","+lng.toFixed(6);
-    modal.classList.add("on");
-  }
-  // called from the building popup button (HTML is injected by Leaflet, so expose on window)
-  window.flvSV=(lat,lng,depthM)=>openStreetView(+lat,+lng,+depthM);
   // building popup HTML, progressively filled. onPartial(html) paints the instant stages so the
   // popup never looks frozen; the returned promise resolves with the FULL html once the slow
   // elevation/stream lookups finish. The parcel lookup and elevation/stream run IN PARALLEL.
@@ -1649,20 +1617,21 @@
     const inch=depthM*39.3701;
     const pInfo=fetchBuildingInfo(lat,lng);   // parcel lookup  \  fired together,
     const pGeo=basementGeo(lat,lng);          // elev + stream  /  run in parallel
-    // header block (instant): flood depth + plain caption + "see it in Street View" button
-    const cc=floodDepthCaption(depthM);
+    // header block (instant): flood depth + plain-language caption
+    const _inch=depthM*39.3701; let _cap,_ccol="#08519c";
+    if(_inch<1){_cap="essentially dry \u2014 just a sheen on the pavement";_ccol="#16a34a";}
+    else if(_inch<4){_cap="ankle-deep \u2014 covers the curb and street gutter";}
+    else if(_inch<9){_cap="up to the first step \u2014 shin-to-knee deep at the curb";}
+    else if(_inch<18){_cap="knee-deep \u2014 reaches the doorstep / threshold";_ccol="#b45309";}
+    else if(_inch<36){_cap="waist-deep \u2014 at or over the front door";_ccol="#c2410c";}
+    else {_cap="over 3 ft \u2014 toward first-floor windows; cars float";_ccol="#b91c1c";}
     const headHTML=()=>{
-      let h='<div style="min-width:230px"><b>Building</b>';
+      let h='<div style="min-width:220px"><b>Building</b>';
       h+='<div style="margin:3px 0"><b>Street flood depth here: </b>'+
         (depthM>=0.10?('<span style="color:#08519c;font-weight:700">'+depthM.toFixed(2)+' m / '+inch.toFixed(1)+' in</span>')
                     :'<span style="color:#16a34a">essentially dry</span>')+'</div>';
       if(depthM>=0.025)
-        h+='<div style="font-size:11px;color:'+cc.ccol+';margin:1px 0 2px">Predicted water is '+cc.cap+'.</div>';
-      // button opens the in-tool Street View of the SAME clicked spot with the water overlaid
-      h+='<button type="button" onclick="window.flvSV&&window.flvSV('+lat.toFixed(6)+','+lng.toFixed(6)+','+depthM.toFixed(4)+')" '+
-         'style="display:block;width:100%;margin-top:3px;padding:6px 8px;border:0;border-radius:7px;'+
-         'background:#1a73e8;color:#fff;font-weight:700;font-size:12px;cursor:pointer">'+
-         '\ud83d\udc41 See this spot in Street View (with water level)</button>';
+        h+='<div style="font-size:11px;color:'+_ccol+';margin:1px 0 2px">Predicted water is '+_cap+'.</div>';
       return h;
     };
     // STAGE 1 (instant): show depth + diagram immediately
@@ -1767,6 +1736,7 @@
         l.on("popupopen",(ev)=>{
           if(typeof dismissBldgHint==="function")dismissBldgHint();  // user found the feature
           const ctr=r.ctr||fCentroid(f); if(!ctr){l.setPopupContent("No location for this building.");return;}
+          markClickedBuilding(ctr[0],ctr[1]);   // pin the clicked building on the map
           const dep=r.d!=null?r.d:(show.flood?depthLL(ctr[0],ctr[1]):0);
           const pop=ev.popup;
           const put=html=>{if(pop.isOpen&&!pop.isOpen())return;pop.setContent(html);};
@@ -2163,14 +2133,6 @@
   (function(){const gm=document.getElementById("galModal");
     if(gm){document.getElementById("galClose").onclick=()=>gm.classList.remove("on");
       gm.onclick=e=>{if(e.target.id==="galModal")gm.classList.remove("on");};}})();
-  // Street View modal close handlers (click X, click the dim backdrop, or press Esc); clearing the
-  // iframe src on close stops Street View from streaming in the background.
-  (function(){const sv=document.getElementById("svModal"); if(!sv)return;
-    const hide=()=>{sv.classList.remove("on");const f=document.getElementById("svFrame");if(f)f.src="about:blank";};
-    const x=document.getElementById("svClose"); if(x)x.onclick=hide;
-    sv.onclick=e=>{if(e.target.id==="svModal")hide();};
-    document.addEventListener("keydown",e=>{if(e.key==="Escape"&&sv.classList.contains("on"))hide();});})();
-
   function repMarker(r,color){
     const m=L.circleMarker([r.lat,r.lng],{radius:6,color:"#fff",weight:1.5,fillColor:color,fillOpacity:.95});
     const imgs=r.images||[];
@@ -2962,6 +2924,7 @@
     const lat=e.latlng.lat,lng=e.latlng.lng;
     const nb=nearestBuilding(lat,lng); if(!nb)return;
     if(typeof dismissBldgHint==="function")dismissBldgHint();
+    markClickedBuilding(nb.ctr[0],nb.ctr[1]);   // pin the clicked building on the map
     const ctr=nb.ctr, dep=(show.flood?buildingFloodDepth(nb.f):0);  // shared strict footprint test
     const pop=L.popup({maxWidth:270}).setLatLng([ctr[0],ctr[1]])
       .setContent("Loading building details\u2026").openOn(map);
@@ -2976,6 +2939,7 @@
   if(clearBtn)clearBtn.onclick=()=>{
     if(addrMarker){map.removeLayer(addrMarker);addrMarker=null;}
     if(pickMarker){map.removeLayer(pickMarker);pickMarker=null;}
+    if(bldgMarker){map.removeLayer(bldgMarker);bldgMarker=null;}  // clear the clicked-building pin
     if(selLayer&&selReset){try{selLayer.setStyle(selReset);}catch(e){}selLayer=null;selReset=null;}
     document.getElementById("addrInput").value="";
     pickMode=false;if(pickBtn)pickBtn.classList.remove("on");document.getElementById("map").style.cursor="";

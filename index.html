@@ -24,7 +24,7 @@
     Census socio-economics     - BNIA / US DOT BTS (ACS)
   Flood depths remain the synthetic demo model until CityCAT rasters are wired in.
 -->
-<link rel="stylesheet" href="styles.css?v=sv19">
+<link rel="stylesheet" href="styles.css?v=v25">
 </head>
 <body>
 <div class="topbar">
@@ -327,31 +327,6 @@
   </div>
 </div>
 
-<div class="modal" id="svModal">
-  <div class="svsheet">
-    <div class="hd">
-      <div><b>Street View of this spot</b>
-        <div class="svbadge"><span class="svpin">📍</span> The exact spot you clicked · <span id="svCoord">—</span></div>
-      </div>
-      <span class="x" id="svClose">×</span>
-    </div>
-    <div class="svbody">
-      <div class="svframewrap">
-        <iframe id="svFrame" title="Google Street View of the clicked location" loading="lazy"
-          referrerpolicy="no-referrer-when-downgrade" allowfullscreen></iframe>
-        <div id="svWater" class="svwater"></div>
-        <div class="svwaterline"></div>
-      </div>
-      <div class="svcap">
-        <div id="svWaterLab" class="svwaterlab">—</div>
-        <div class="svnote">The blue band is the <b>predicted flood height</b> from the model, drawn on real Street View as an
-          approximate guide (the Street View photo itself is from a dry day). Actual depth varies with the exact spot and storm.
-          <a id="svOpenMaps" href="#" target="_blank" rel="noopener">Open this view in Google Maps ↗</a></div>
-      </div>
-    </div>
-  </div>
-</div>
-
 <script src="data/images.js"></script>
 <script src="data/geo.js"></script>
 <script src="data/streamgrid.js"></script>
@@ -360,8 +335,8 @@
 <script src="data/cameras.js"></script>
 <script src="data/claims.js"></script>
 <script src="data/stations.js"></script>
-<script src="data/floodhist.js?v=sv19"></script>
-<script src="data/streamcells.js?v=sv19"></script>
-<script src="app.js?v=sv19"></script>
+<script src="data/floodhist.js?v=v25"></script>
+<script src="data/streamcells.js?v=v25"></script>
+<script src="app.js?v=v25"></script>
 </body>
 </html>
