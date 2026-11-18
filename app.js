@@ -432,7 +432,7 @@
   }
 
 
-  const show={flood:true,reports:false,social:false,mycoast:false,cameras:false,weather:false,usgs:false,noaa:false,claims:false,hist:false,news:false,closures:false,fema:false,roads:false,areas:false,bldg:true,nb:false,ws:false,streams:false,streamGrid:false,landcover:false,soil:false,infra:false,fl311:false,wb311:false};
+  const show={flood:true,reports:false,social:false,mycoast:false,cameras:false,weather:false,usgs:false,noaa:false,claims:false,hist:false,news:false,closures:false,fema:false,roads:false,areas:false,bldg:true,nb:false,ws:false,streams:false,streamGrid:false,landcover:false,soil:false,infra:false,fl311:false,wb311:false,storms:false,radarLive:false,radarMrms:false,tide:false};
   const inf={fire:false,police:false,hosp:false,cool:false,nurse:false,shel:false,schPub:false,schCh:false,schInd:false,rail:false,bus:false};
   let choroMetric="none";
   let facShowAll=false;  // Emergency facility panel: show all vs flooded-only
@@ -1895,11 +1895,13 @@
     if(show.reports)drawReports();
     if(show.social)drawSocial();
     if(show.mycoast)drawMyCoast();
+    if(show.storms)drawStorm();        // re-clip the selected storm's points to the focus
     if(show.closures)drawClosures();
     if(show.cameras)drawCameras();
     if(show.weather)drawWeather();
     if(show.usgs)drawUsgs();
     if(show.noaa)drawNoaa();
+    if(show.tide)drawTide();
     if(show.claims)drawClaims();
     if(show.hist)drawHist();           // re-shade historical likelihood for new rainfall/focus
     if(show.streams)renderStreams();   // re-clip stream lines to the focus
@@ -2033,6 +2035,583 @@
   const NEWS=(typeof NEWS_REPORTS!=="undefined")?NEWS_REPORTS:[];
   const RCL=(typeof ROADCLOSURE_REPORTS!=="undefined")?ROADCLOSURE_REPORTS:[];
 
+  // ---------- Past storms (2010-2025): 311 flooded-street reports grouped by storm event ----------
+  let STORMS=(typeof FLOOD_STORMS!=="undefined")?FLOOD_STORMS.slice():[];
+  const stormLayer=L.layerGroup();
+  // BWI Airport rain gauge — the source of the timeline's hourly rainfall (see _make_storms.py)
+  const BWI_GAUGE={lat:39.1754,lng:-76.6684};
+  let selStorm=null;               // currently selected storm record
+  const SEVCOL={severe:"#b91c1c",moderate:"#ea580c",minor:"#eab308"};
+  function fmtStormDate(r){
+    const f=s=>{const [y,m,d]=s.split("-");return ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][+m-1]+" "+(+d)+", "+y;};
+    return r.d0===r.d1?f(r.d0):(f(r.d0).replace(", "+r.d0.slice(0,4),"")+" \u2013 "+f(r.d1));
+  }
+  // timeline animation state (works in MINUTES-since-00:00 of the storm's first day, ET)
+  let stormMin=null;           // null = show ALL reports; number = reveal reports with minute<=stormMin
+  let stormPlayTimer=null;     // setInterval handle when auto-playing
+  const STORM_STEP=30;         // advance 30 min per tick
+  const STORM_TICK=1100;       // ms per tick (slower, readable)
+  function stormMaxMin(){ let m=0; (selStorm&&selStorm.fl||[]).forEach(p=>{ if(p[2]>m)m=p[2]; });
+    stormOtherSources().forEach(o=>{ if(o.off>m)m=o.off; }); return m; }
+  const DOW=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+  const MON=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  // convert a minute-offset into a readable local date+time, based on the storm's d0
+  function stormClock(minOff){
+    const y=+selStorm.d0.slice(0,4), mo=+selStorm.d0.slice(5,7)-1, d=+selStorm.d0.slice(8,10);
+    const dt=new Date(y,mo,d,0,minOff);   // local date math handles day rollover
+    let hr=dt.getHours(), ap=hr<12?"AM":"PM"; let h12=hr%12; if(h12===0)h12=12;
+    const mm=String(dt.getMinutes()).padStart(2,"0");
+    return { date: DOW[dt.getDay()]+", "+MON[dt.getMonth()]+" "+dt.getDate()+" "+dt.getFullYear(),
+             time: h12+":"+mm+" "+ap };
+  }
+  // the on-map clock overlay (created once), placed TOP-LEFT under the "click any building" hint
+  let stormClockEl=null;
+  function showStormClock(html){
+    if(!stormClockEl){
+      stormClockEl=document.createElement("div"); stormClockEl.id="stormClock";
+      stormClockEl.style.cssText="position:absolute;top:54px;left:50%;transform:translateX(-50%);z-index:800;"+
+        "background:rgba(15,61,92,.94);color:#fff;padding:8px 16px;border-radius:12px;text-align:center;"+
+        "box-shadow:0 3px 14px rgba(0,0,0,.4);font-family:system-ui,Arial,sans-serif;pointer-events:none;line-height:1.3;min-width:170px";
+      const mapEl=document.getElementById("map")||document.body; mapEl.appendChild(stormClockEl);
+    }
+    stormClockEl.style.display="block"; stormClockEl.innerHTML=html;
+  }
+  function hideStormClock(){ if(stormClockEl)stormClockEl.style.display="none"; }
+  // accumulated rainfall (inches) from 00:00 of d0 up to a minute-offset, from the hourly array
+  function stormRainTo(mn){
+    const hr=selStorm&&selStorm.hr; if(!hr||!hr.length) return null;
+    const hrs=Math.min(hr.length, Math.floor(mn/60)+1); let s=0;
+    for(let i=0;i<hrs;i++) s+=hr[i]||0;
+    return s/25.4;   // mm -> inches
+  }
+  function stormRainTotal(){
+    const hr=selStorm&&selStorm.hr; if(!hr||!hr.length) return null;
+    let s=0; for(const v of hr) s+=v||0; return s/25.4;
+  }
+  // days between two YYYY-MM-DD dates (b-a)
+  function dayDiff(a,b){
+    const pa=a.split("-").map(Number), pb=b.split("-").map(Number);
+    const ua=Date.UTC(pa[0],pa[1]-1,pa[2]), ub=Date.UTC(pb[0],pb[1]-1,pb[2]);
+    return Math.round((ub-ua)/86400000);
+  }
+  // Reports from OTHER sources (MyCoast + dated social/validated photos) that fall on the
+  // same day(s) as the selected storm. Returns [{r, src, off}] where src is "mycoast"|"social"
+  // and off = minute offset within the storm (reports carry only a DATE, so they reveal at NOON
+  // of their day during playback). 311 flooded-street points are the storm's own .fl array.
+  function stormOtherSources(){
+    if(!selStorm)return [];
+    const dayOff=w=>{ if(!w)return null; const d=String(w).slice(0,10);
+      if(d<selStorm.d0||d>selStorm.d1)return null; return dayDiff(selStorm.d0,d)*1440+720; };
+    const out=[];
+    (typeof MYC!=="undefined"?MYC:[]).forEach(r=>{ const o=r.lat!=null?dayOff(r.when):null; if(o!=null) out.push({r,src:"mycoast",off:o}); });
+    [].concat((typeof SOC!=="undefined"?SOC:[]),(typeof YT!=="undefined"?YT:[]),(typeof REP!=="undefined"?REP:[]))
+      .forEach(r=>{ const o=r.lat!=null?dayOff(r.when):null; if(o!=null) out.push({r,src:"social",off:o}); });
+    return out;
+  }
+  // total reports (311 + other sources) for the selected storm
+  function stormTotalReports(){ return (selStorm?selStorm.nfl:0) + stormOtherSources().length; }
+  // combined count revealed up to a minute offset (311 .fl + other-source noon offsets)
+  function stormReportsUpTo(mn){
+    let c=0;
+    (selStorm&&selStorm.fl||[]).forEach(p=>{ if(p[2]<=mn)c++; });
+    stormOtherSources().forEach(o=>{ if(o.off<=mn)c++; });
+    return c;
+  }
+  // Community-reported storm events: for dated MyCoast/social/photo reports that fall on days
+  // NOT covered by any 311 storm (e.g. 2026, when there is no 311-2026 service), synthesize a
+  // lightweight storm so those reports still appear in Past Storms. These have nfl:0 (no 311)
+  // and are tagged src:"community"; the timeline/clock already count the other-source reports.
+  const _baseStorms = STORMS.slice();   // original 311-built storms (keep separate)
+  function buildCommunityStorms(){
+    // dates already covered by a 311 storm
+    const covered = d => _baseStorms.some(s=> d>=s.d0 && d<=s.d1 );
+    // collect all dated community reports -> unique sorted days NOT covered
+    const days = {};
+    const all = [].concat((typeof MYC!=="undefined"?MYC:[]),(typeof SOC!=="undefined"?SOC:[]),
+                          (typeof YT!=="undefined"?YT:[]),(typeof REP!=="undefined"?REP:[]));
+    all.forEach(r=>{ if(r.lat==null||!r.when)return; const d=String(r.when).slice(0,10);
+      if(d.length!==10||covered(d))return; (days[d]=days[d]||[]).push(r); });
+    const sorted = Object.keys(days).sort();
+    // group consecutive days (gap <=1) into events, cap span at 3 days
+    const events=[]; let cur=null;
+    sorted.forEach(d=>{
+      if(cur && dayDiff(cur.d1,d)<=1 && dayDiff(cur.d0,d)<3){ cur.d1=d; cur.days.push(d); }
+      else { cur={d0:d,d1:d,days:[d]}; events.push(cur); }
+    });
+    // build storm-shaped records. Severity for a citizen-reported day is graded from BOTH the
+    // number of reports AND the peak rainfall any report recorded (MyCoast carries rainIn),
+    // so these also read as severe / moderate / minor like the 311 storms.
+    const synth = events.map(ev=>{
+      const recs=ev.days.reduce((a,d)=>a.concat(days[d]),[]);
+      const n=recs.length;
+      let maxRain=0; recs.forEach(r=>{ if(typeof r.rainIn==="number"&&r.rainIn>maxRain)maxRain=r.rainIn; });
+      let sev="minor";
+      if(n>=10||maxRain>=2.0) sev="severe";
+      else if(n>=4||maxRain>=1.0) sev="moderate";
+      return { d0:ev.d0, d1:ev.d1, nfl:0, rainIn:(maxRain>0?+maxRain.toFixed(2):null), rainMm:null,
+               sev:sev, span:ev.days.length, fl:[], src:"community" };
+    });
+    STORMS = _baseStorms.concat(synth);
+    STORMS.sort((a,b)=> a.d0<b.d0?1:(a.d0>b.d0?-1:0));   // newest first
+  }
+  buildCommunityStorms();
+  const STORM_SRC_STYLE={
+    "311":    {label:"311 report",       color:"#ea580c"},
+    mycoast:  {label:"MyCoast report",   color:"#0e7490", letter:"M"},
+    social:   {label:"Social / news / photo report", color:"#7c3aed", letter:"S"}
+  };
+  // draw the selected storm's flooded-street points, optionally only those up to stormMin
+  function drawStorm(){
+    stormLayer.clearLayers();
+    if(!show.storms||!selStorm){if(map.hasLayer(stormLayer))map.removeLayer(stormLayer);hideStormClock();renderStormSrcLegend();return;}
+    if(!map.hasLayer(stormLayer))stormLayer.addTo(map);
+    const col=SEVCOL[selStorm.sev]||"#ea580c";
+    let shown=0;
+    (selStorm.fl||[]).forEach(p=>{
+      if(stormMin!=null && p[2]>stormMin) return;               // not yet reached this time
+      if(!fcPass(p[0],p[1]))return;
+      const fresh=(stormMin!=null && p[2]>stormMin-STORM_STEP); // arrived in the last step -> pop
+      const c=stormClock(p[2]);
+      L.circleMarker([p[0],p[1]],{radius:fresh?8:5,color:fresh?"#ffd23f":"#fff",weight:fresh?2:1,
+        fillColor:fresh?"#ff8c1a":col,fillOpacity:.92})
+        .bindTooltip("<b>311 report</b> \u00b7 flooded street<br>"+c.date+" \u00b7 "+c.time,{direction:"top"})
+        .addTo(stormLayer);
+      shown++;
+    });
+    // overlay MyCoast + social/news/photo reports, tagged by source and revealed by time
+    // (they carry only a date, so each reveals at noon of its day during playback)
+    let other=0;
+    stormOtherSources().forEach(o=>{
+      const r=o.r; if(!fcPass(r.lat,r.lng))return;
+      if(stormMin!=null && o.off>stormMin) return;                 // not yet reached this time
+      const fresh=(stormMin!=null && o.off>stormMin-STORM_STEP);   // arrived in the last step -> pop
+      const st=STORM_SRC_STYLE[o.src];
+      const sz=fresh?22:18, pos=fresh?11:9;
+      const m=L.marker([r.lat,r.lng],{icon:L.divIcon({className:"stormsrcdiv",
+        html:'<div class="stormsrcpin'+(fresh?" fresh":"")+'" style="background:'+st.color+'">'+st.letter+'</div>',
+        iconSize:[sz,sz],iconAnchor:[pos,pos]})});
+      const whenNote=r.whenSrc==="inferred"?' <i>(date inferred from same location)</i>':(r.whenSrc==="event"?' <i>(documented flood event)</i>':"");
+      const whenTxt=r.when?("<br>"+r.when+whenNote+' \u00b7 <span style="color:#94a3b8">time not recorded</span>'):"";
+      let tip='<b>'+st.label+'</b>'+(r.name?("<br>"+r.name):"")+whenTxt;
+      m.bindTooltip(tip,{direction:"top"});
+      // rich report popup (photos, link, rainfall) with working gallery wiring
+      m.bindPopup(reportPopupHtml(r),{maxWidth:270});
+      m.on("popupopen",ev=>wireReportPopup(ev.popup._contentNode,r));
+      m.addTo(stormLayer); other++;
+    });
+    // show WHERE the "BWI gauge" rainfall on the timer is measured (only when this storm has
+    // hourly rain data). A labeled rain-gauge pin so users can locate the reference gauge.
+    if(selStorm.hr&&selStorm.hr.length){
+      const rNow=(stormMin==null)?stormRainTotal():stormRainTo(stormMin);
+      const rTxt=(rNow!=null)?(rNow.toFixed(2)+'\u2033'):'';
+      // raindrop sits ON the gauge point; label floats to its right. This number is the
+      // ACCUMULATED storm rainfall at BWI (total so far) -- different from the radar hover rate.
+      L.marker([BWI_GAUGE.lat,BWI_GAUGE.lng],{icon:L.divIcon({className:"bwidiv",
+        html:'<span class="bwidrop">\uD83D\uDCA7</span><span class="bwitag">BWI gauge'+(rTxt?' \u00b7 '+rTxt+' total':'')+'</span>',
+        iconSize:[22,28],iconAnchor:[11,26]}),zIndexOffset:1000})
+        .bindTooltip("<b>BWI rain gauge</b><br>The timer's rainfall is the storm <b>total so far</b> measured here (BWI Airport).",{direction:"top"})
+        .addTo(stormLayer);
+    }
+    renderStormSrcLegend();
+    return shown;
+  }
+  // small legend in the storm panel showing which sources are on the map (311 / MyCoast / social)
+  // counts are storm TOTALS; the clock/timeline show how many have been revealed so far.
+  function renderStormSrcLegend(){
+    const el=document.getElementById("stormSrcLegend"); if(!el)return;
+    if(!show.storms||!selStorm){ el.style.display="none"; el.innerHTML=""; return; }
+    const oc=stormOtherSources();
+    const nM=oc.filter(o=>o.src==="mycoast").length, nS=oc.filter(o=>o.src==="social").length;
+    const n311=selStorm.nfl||0;
+    const isCommunity=(selStorm.src==="community");
+    el.style.display="block";
+    el.innerHTML=(isCommunity?'<div style="color:#0e7490;margin-bottom:3px">\u2139\ufe0f Citizen-reported day \u2014 flooding reported via MyCoast/social; the city has no 311 record for this date (e.g. 2026).</div>':'')+
+      '<div style="font-weight:700;margin-bottom:2px">Report sources this storm</div>'+
+      '<div style="display:flex;align-items:center;gap:5px;margin:1px 0"><span style="width:9px;height:9px;border-radius:50%;background:'+STORM_SRC_STYLE["311"].color+';border:1px solid #fff;box-shadow:0 0 0 1px #cbd5e1"></span> 311 flooded street ('+n311+')</div>'+
+      '<div style="display:flex;align-items:center;gap:5px;margin:1px 0"><span class="srcchip" style="background:'+STORM_SRC_STYLE.mycoast.color+'">M</span> MyCoast ('+nM+')</div>'+
+      '<div style="display:flex;align-items:center;gap:5px;margin:1px 0"><span class="srcchip" style="background:'+STORM_SRC_STYLE.social.color+'">S</span> Social / news / photo ('+nS+')</div>'+
+      ((nM+nS)===0?'<div style="color:#94a3b8;margin-top:2px">No MyCoast/social reports matched this storm\u2019s date.</div>':'');
+  }
+  function stopStormPlay(){ if(stormPlayTimer){clearInterval(stormPlayTimer);stormPlayTimer=null;} }
+  function updateStormClock(){
+    if(stormMin==null){ hideStormClock(); return; }
+    const c=stormClock(stormMin);
+    const cnt=stormReportsUpTo(stormMin), tot=stormTotalReports();
+    const rain=stormRainTo(stormMin);
+    // Rainfall here is the BWI point gauge (not the whole area), so radar can show rain over
+    // parts of the map before this gauge registers any -> label it clearly to avoid confusion.
+    const rainLine = (rain!=null)
+      ? '<div style="font-size:12px;margin-top:2px;color:#8fd0ff">\u2614 '+rain.toFixed(2)+'&Prime; at BWI gauge</div>'
+      : '';
+    showStormClock('<div style="font-size:11.5px;opacity:.85">'+c.date+'</div>'+
+      '<div style="font-size:22px;font-weight:800;letter-spacing:.5px">'+c.time+'</div>'+
+      '<div style="font-size:12px;margin-top:1px"><b>'+cnt+'</b> of '+tot+' reports</div>'+
+      rainLine);
+  }
+  // render the timeline player (slider + play/pause + live time & report count)
+  function renderStormTimeline(){
+    const box=document.getElementById("stormTimeline"); if(!box)return;
+    if(!show.storms||!selStorm){ box.style.display="none"; box.innerHTML=""; stopStormPlay(); hideStormClock(); return; }
+    box.style.display="block";
+    const maxM=stormMaxMin();
+    const mn=(stormMin==null)?maxM:stormMin;
+    const playing=!!stormPlayTimer;
+    const tot=stormTotalReports();
+    const cnt=(stormMin==null)?tot:stormReportsUpTo(mn);
+    const c=stormClock(mn);
+    const rain=(stormMin==null)?stormRainTotal():stormRainTo(mn);
+    const totR=stormRainTotal();
+    const rainTxt = (rain!=null)
+      ? (" \u00b7 \u2614 "+rain.toFixed(2)+'&Prime; BWI'+(totR!=null&&stormMin!=null?(" of "+totR.toFixed(2)+'&Prime;'):""))
+      : (selStorm.rainIn?(" \u00b7 \u2614 "+selStorm.rainIn+'&Prime; peak-day'):"");
+    box.innerHTML=
+      '<div class="lpnote" style="margin:0 0 3px"><b>Storm timeline</b> \u2014 watch the flooding &amp; rainfall build up</div>'+
+      '<div class="row" style="display:flex;gap:6px;align-items:center">'+
+        '<button id="stormPlay" style="flex:0 0 auto;padding:6px 10px;border:0;border-radius:7px;cursor:pointer;'+
+        'font-weight:700;font-size:12px;background:#0f3d5c;color:#fff">'+(playing?"\u2759\u2759 Pause":"\u25B6 Play")+'</button>'+
+        '<input id="stormTime" type="range" min="0" max="'+maxM+'" step="'+STORM_STEP+'" value="'+mn+'" style="flex:1">'+
+      '</div>'+
+      '<div class="row" style="display:flex;justify-content:space-between;margin-top:3px">'+
+        '<span class="lpnote" style="margin:0"><b>'+(stormMin==null?"Full storm":c.time)+'</b>'+rainTxt+'</span>'+
+        '<span class="lpnote" style="margin:0">'+cnt+' of '+tot+' reports</span>'+
+      '</div>'+
+      ((stormMin==null)
+        ?'<div class="lpnote" style="margin-top:2px">Showing the full storm (311 + MyCoast + social). Press \u25B6 Play to replay it over time.</div>'
+        :(selStorm.hr?'<div class="lpnote" style="margin-top:2px;color:#94a3b8">Rainfall is measured at the BWI gauge, so radar can show rain over other parts of the area before this number rises.</div>':''));
+    const sl=document.getElementById("stormTime");
+    if(sl)sl.oninput=()=>{ stopStormPlay(); stormMin=+sl.value; drawStorm(); updateStormClock(); syncStormRadarToTime(); renderStormTimeline(); };
+    const pb=document.getElementById("stormPlay");
+    if(pb)pb.onclick=()=>{ playing?stopStormPlay():startStormPlay(); renderStormTimeline(); };
+  }
+  function startStormPlay(){
+    stopStormPlay();
+    const maxM=stormMaxMin();
+    if(stormMin==null||stormMin>=maxM) stormMin=0;   // restart from the beginning
+    drawStorm(); updateStormClock(); syncStormRadarToTime();
+    stormPlayTimer=setInterval(()=>{
+      stormMin+=STORM_STEP;
+      if(stormMin>maxM){ stopStormPlay(); stormMin=null; drawStorm(); hideStormClock(); renderStormTimeline(); return; }
+      drawStorm(); updateStormClock(); syncStormRadarToTime(); renderStormTimeline();
+    }, STORM_TICK);
+  }
+  // keep the historical storm radar in step with the timeline time (if radar is on)
+  function syncStormRadarToTime(){
+    if(radarHistLayer && selStorm && stormMin!=null){
+      const hourET=Math.floor((stormMin%1440)/60), dayIdx=Math.floor(stormMin/1440);
+      const y=+selStorm.d0.slice(0,4), m=+selStorm.d0.slice(5,7), d=+selStorm.d0.slice(8,10)+dayIdx;
+      const iso=new Date(Date.UTC(y,m-1,d)).toISOString().slice(0,10);
+      showStormRadar(iso, (hourET+5)%24);   // ET -> UTC (~ +5h)
+    }
+  }
+  // build the scrollable storm list in the panel
+  function renderStormList(){
+    const box=document.getElementById("stormList"); if(!box)return;
+    const q=(document.getElementById("stormSearch").value||"").trim();
+    const sevF=document.getElementById("stormSev").value;
+    let rows=STORMS.filter(r=>{
+      if(sevF==="severe"&&r.sev!=="severe")return false;
+      if(sevF==="moderate"&&r.sev==="minor")return false;
+      if(q&&!(r.d0+" "+r.d1).includes(q))return false;
+      return true;
+    });
+    const total=rows.length;
+    rows=rows.slice(0,120);   // cap the DOM list
+    box.innerHTML=rows.map((r,i)=>{
+      const idx=STORMS.indexOf(r);
+      const community=(r.src==="community");
+      const col=SEVCOL[r.sev];   // dot + tag always reflect SEVERITY (severe/moderate/minor)
+      const sel=(selStorm===r)?"background:#eef6fc;":"";
+      const sub=community
+        ? '<span style="color:#5d6b78"><span style="color:'+STORM_SRC_STYLE.mycoast.color+';font-weight:700">Citizen-reported</span> \u00b7 MyCoast / social'+(r.rainIn!=null?(' \u00b7 '+r.rainIn+'&Prime; rain'):'')+'</span>'
+        : '<span style="color:#5d6b78">'+r.nfl+' streets'+(r.rainIn!=null?(' \u00b7 '+r.rainIn+'&Prime; rain'):'')+'</span>';
+      // tag = severity; citizen storms also get a small teal dot so you can tell them apart
+      const tag=r.sev+(community?' <span style="color:'+STORM_SRC_STYLE.mycoast.color+'" title="Citizen-reported (MyCoast/social), no 311 this day">\u25cf</span>':'');
+      return '<div class="stormrow" data-i="'+idx+'" style="display:flex;gap:7px;align-items:center;'+
+        'padding:6px 8px;border-bottom:1px solid #f0f3f6;cursor:pointer;'+sel+'">'+
+        '<span style="flex:0 0 9px;width:9px;height:9px;border-radius:50%;background:'+col+'"></span>'+
+        '<span style="flex:1;font-size:12px;line-height:1.25"><b>'+fmtStormDate(r)+'</b><br>'+sub+'</span>'+
+        '<span style="flex:0 0 auto;font-size:10px;font-weight:700;color:'+col+';text-transform:uppercase">'+tag+'</span>'+
+        '</div>';
+    }).join("")||'<div style="padding:10px;font-size:12px;color:#94a3b8">No storms match.</div>';
+    const note=document.getElementById("stormNote");
+    const nCommunity=STORMS.filter(r=>r.src==="community").length;
+    if(note)note.innerHTML=total+" storm"+(total===1?"":"s")+" (2010\u20132026) \u00b7 "+
+      STORMS.filter(r=>r.sev==="severe").length+" severe"+
+      (nCommunity?(" \u00b7 "+nCommunity+' <span title="Days flooding was reported by MyCoast or social media but the city has no 311 record (e.g. 2026)">citizen-reported</span>'):"")+
+      ". Reporting-biased; indicative only.";
+    box.querySelectorAll(".stormrow").forEach(el=>el.onclick=()=>{
+      selStorm=STORMS[+el.dataset.i];
+      stopStormPlay(); stormMin=null;    // reset timeline to "show all" for the new storm
+      clearStormRadar();                 // clear any previous storm's radar
+      renderStormList(); drawStorm(); renderStormTimeline(); renderStormRadarBtn();
+      // fit to the storm's points: 311 points if present, otherwise the community reports
+      let pts=(selStorm&&selStorm.fl&&selStorm.fl.length)?selStorm.fl.map(p=>[p[0],p[1]]):[];
+      if(!pts.length)pts=stormOtherSources().map(o=>[o.r.lat,o.r.lng]);
+      if(pts.length){try{map.fitBounds(L.latLngBounds(pts).pad(0.2),{maxZoom:14});}catch(e){}}
+    });
+  }
+  // "Show radar for this storm" + an hour slider to sweep the storm across the area.
+  // (Reflectivity is a per-minute snapshot, so one frame only covers part of the area; the slider
+  // lets you find when the storm was overhead. Historical radar exists from 2011-02-16 on.)
+  let stormRadarHour=22;   // default UTC hour (~late afternoon/evening ET) when storms often peak
+  function renderStormRadarBtn(){
+    const box=document.getElementById("stormRadar"); if(!box)return;
+    if(!selStorm){ box.style.display="none"; box.innerHTML=""; return; }
+    box.style.display="block";
+    if(selStorm.d1<"2011-02-16"){
+      box.innerHTML='<div class="lpnote" style="margin:0">Radar imagery isn\u2019t available before Feb 2011 for this storm.</div>';
+      return;
+    }
+    const on = !!radarHistLayer;
+    let h='<button id="stormRadarBtn" style="width:100%;padding:7px;border:0;border-radius:7px;cursor:pointer;'+
+      'font-weight:700;font-size:12px;background:'+(on?"#0f3d5c":"#1a73e8")+';color:#fff">'+
+      (on?"\u25A0 Hide storm radar":"\uD83D\uDCE1 Show radar for this storm")+'</button>';
+    if(on){
+      const lab=radarFrameLabel(selStorm.d1,stormRadarHour);
+      h+='<div class="lpnote" style="margin:5px 0 1px;font-weight:700;color:#0f3d5c">\uD83D\uDD52 '+lab.date+' \u00b7 '+lab.time+'</div>'+
+         '<div class="row" style="display:flex;gap:6px;align-items:center;margin:2px 0 0">'+
+         '<span class="lpnote" style="margin:0">Earlier</span>'+
+         '<input id="stormRadarHour" type="range" min="0" max="23" step="1" value="'+stormRadarHour+'" style="flex:1">'+
+         '<span class="lpnote" style="margin:0">Later</span></div>'+
+         '<div class="lpnote" style="margin-top:1px;text-align:center">'+lab.time+' local \u00b7 '+lab.utc+'</div>'+
+         '<div class="lpnote" id="stormRadarMsg" style="margin-top:2px">Drag to scrub through the day and watch the storm move across the area.</div>'+
+         '<div class="lpnote" style="margin-top:4px">'+radarLegendHtml("reflect")+'</div>';
+    }
+    box.innerHTML=h;
+    const btn=document.getElementById("stormRadarBtn");
+    if(btn)btn.onclick=()=>{
+      if(radarHistLayer){ clearStormRadar(); }
+      else { stormRadarHour=22; showStormRadar(selStorm.d1,stormRadarHour); }
+      renderStormRadarBtn();
+    };
+    const sl=document.getElementById("stormRadarHour");
+    if(sl)sl.oninput=()=>{ stormRadarHour=+sl.value; showStormRadar(selStorm.d1,stormRadarHour); renderStormRadarBtn(); };
+  }
+  // Human-readable label for a radar frame (dayISO = UTC date, hourUTC 0-23).
+  // The WMS-T frame is at HH:30 UTC; convert to local (ET) date + time for display.
+  function radarFrameLabel(dayISO,hourUTC){
+    const y=+dayISO.slice(0,4), m=+dayISO.slice(5,7), d=+dayISO.slice(8,10);
+    const hr=Math.max(0,Math.min(23,hourUTC==null?22:hourUTC));
+    const dt=new Date(Date.UTC(y,m-1,d,hr,30));   // real instant of the frame
+    let lh=dt.getHours(), ap=lh<12?"AM":"PM"; let h12=lh%12; if(h12===0)h12=12;
+    const mm=String(dt.getMinutes()).padStart(2,"0");
+    return { date: DOW[dt.getDay()]+", "+MON[dt.getMonth()]+" "+dt.getDate()+", "+dt.getFullYear(),
+             time: h12+":"+mm+" "+ap,
+             utc: String(hr).padStart(2,"0")+":30 UTC" };
+  }
+
+  // ---------- Radar rainfall (NOAA NEXRAD + MRMS via Iowa Environmental Mesonet, free/keyless) ----------
+  const IEM_REFLECT="https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q.cgi?";
+  const IEM_REFLECT_T="https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi?";
+  const IEM_MRMS="https://mesonet.agron.iastate.edu/cgi-bin/mapserv/mapserv?map=/opt/iem/data/wms/us/mrms.map&";
+  let radarLiveLayer=null, radarMrmsLayer=null, radarHistLayer=null, radarRefreshTimer=null;
+  function radarOpacity(){ const s=document.getElementById("radarOpacity"); return s?(+s.value/100):0.75; }
+  function radarSubsVis(){
+    const any=show.radarLive||show.radarMrms||!!radarHistLayer;
+    const sub=document.getElementById("radarSubs"); if(sub)sub.style.display=any?"block":"none";
+    updateRadarLegend();
+  }
+  // Check whether the LIVE layer actually has echoes over the study area; if not, tell the user
+  // it's simply dry right now (so an empty map doesn't look broken).
+  function checkRadarNow(kind){
+    const el=document.getElementById("radarStatus"); if(!el)return;
+    el.innerHTML="Checking current conditions\u2026";
+    // CONUS-area bbox in EPSG:3857 around Baltimore
+    const b="-8700000,4650000,-8450000,4850000";
+    const url = kind==="mrms"
+      ? IEM_MRMS+"SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&LAYERS=mrms_p24h&STYLES=&FORMAT=image/png&TRANSPARENT=true&SRS=EPSG:3857&BBOX="+b+"&WIDTH=120&HEIGHT=100&_ts="+Date.now()
+      : IEM_REFLECT+"SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&LAYERS=nexrad-n0q&STYLES=&FORMAT=image/png&TRANSPARENT=true&SRS=EPSG:3857&BBOX="+b+"&WIDTH=120&HEIGHT=100&_ts="+Date.now();
+    const img=new Image(); img.crossOrigin="anonymous";
+    img.onload=()=>{
+      try{
+        const cv=document.createElement("canvas"); cv.width=img.width; cv.height=img.height;
+        const cx=cv.getContext("2d"); cx.drawImage(img,0,0);
+        const d=cx.getImageData(0,0,cv.width,cv.height).data; let wet=0;
+        for(let i=3;i<d.length;i+=4) if(d[i]>10) wet++;
+        if(wet>5) el.innerHTML="\u2705 Rain is showing on radar now.";
+        else el.innerHTML="\u2600\ufe0f <b>No rain over Baltimore right now</b> \u2014 live radar is clear. Use <b>Past storms \u2192 Show radar for this storm</b> to see a real storm.";
+      }catch(e){ el.innerHTML="Live radar is on (clear if it\u2019s not raining). Try a Past storm for a guaranteed example."; }
+    };
+    img.onerror=()=>{ el.innerHTML="Could not reach the radar service just now \u2014 please retry."; };
+    img.src=url;
+  }
+  // Build a legend whose colors match the actual WMS overlay.
+  //  - "reflect": NOAA NEXRAD N0Q base-reflectivity ramp (same colors the live & storm radar draw)
+  //  - "mrms":    NOAA MRMS 24-hour accumulated-rainfall ramp
+  function radarLegendHtml(kind){
+    if(kind==="mrms"){
+      // MRMS q3 24h precip ramp (light blue -> green -> yellow -> red -> purple)
+      const grad="linear-gradient(to right,#c8e8ff 0%,#6fb0e8 12%,#2f9e44 30%,#b7e000 46%,#ffe000 58%,#ff8c00 72%,#e00000 86%,#8a2be2 100%)";
+      return '<b>Rainfall, past 24 h (MRMS)</b>'+
+        '<div style="height:10px;border-radius:3px;border:1px solid #cdd6df;margin:3px 0 1px;background:'+grad+'"></div>'+
+        '<div style="display:flex;justify-content:space-between;font-size:9px;color:#5d6b78">'+
+        '<span>0.1&Prime;</span><span>0.5&Prime;</span><span>1&Prime;</span><span>2&Prime;</span><span>4&Prime;+</span></div>';
+    }
+    // NEXRAD N0Q base reflectivity ramp (dBZ) — matches nexrad-n0q tiles
+    const grad="linear-gradient(to right,"+
+      "#04e9e7 0%,#019ff4 9%,#0300f4 18%,#02fd02 27%,#01c501 33%,#008e00 40%,"+
+      "#fdf802 50%,#e5bc00 56%,#fd9500 62%,#fd0000 70%,#d40000 76%,#bc0000 82%,"+
+      "#f800fd 90%,#9854c6 100%)";
+    // Approx rain RATE from reflectivity via the standard NWS Z-R relation (Z=300R^1.4):
+    // historical radar is reflectivity, not measured rainfall, so this is an estimate.
+    return '<b>Radar intensity \u2192 approx. rain rate</b>'+
+      '<div style="height:10px;border-radius:3px;border:1px solid #cdd6df;margin:3px 0 1px;background:'+grad+'"></div>'+
+      '<div style="display:flex;justify-content:space-between;font-size:9px;color:#5d6b78">'+
+      '<span>light</span><span>moderate</span><span>heavy</span><span>intense</span></div>'+
+      '<div style="display:flex;justify-content:space-between;font-size:9px;color:#2563eb;font-weight:600">'+
+      '<span>~0.01&Prime;/hr</span><span>~0.25&Prime;/hr</span><span>~1&Prime;/hr</span><span>2&Prime;+/hr</span></div>'+
+      '<div style="font-size:8.5px;color:#94a3b8;margin-top:1px">Estimated from radar reflectivity (Z\u2013R), not a direct gauge.</div>';
+  }
+  function updateRadarLegend(){
+    const el=document.getElementById("radarLegend"); if(!el)return;
+    el.innerHTML=radarLegendHtml(show.radarMrms?"mrms":"reflect");
+  }
+  function drawRadarLive(){
+    if(radarLiveLayer){map.removeLayer(radarLiveLayer);radarLiveLayer=null;}
+    if(radarRefreshTimer){clearInterval(radarRefreshTimer);radarRefreshTimer=null;}
+    if(show.radarLive){
+      radarLiveLayer=L.tileLayer.wms(IEM_REFLECT,{layers:"nexrad-n0q",format:"image/png",
+        transparent:true,opacity:radarOpacity(),pane:"flood",attribution:"NOAA NEXRAD / IEM"}).addTo(map);
+      radarRefreshTimer=setInterval(()=>{ if(radarLiveLayer)radarLiveLayer.setParams({_ts:Date.now()}); },5*60*1000);
+      checkRadarNow("reflect");
+    }
+    radarSubsVis();
+  }
+  function drawRadarMrms(){
+    if(radarMrmsLayer){map.removeLayer(radarMrmsLayer);radarMrmsLayer=null;}
+    if(show.radarMrms){
+      radarMrmsLayer=L.tileLayer.wms(IEM_MRMS,{layers:"mrms_p24h",format:"image/png",
+        transparent:true,opacity:radarOpacity(),pane:"flood",attribution:"NOAA MRMS / IEM"}).addTo(map);
+      checkRadarNow("mrms");
+    }
+    radarSubsVis();
+  }
+  // historical radar for a chosen storm date (WMS-T). dayISO="YYYY-MM-DD", hourUTC 0-23.
+  // One frame is a per-minute snapshot, so coverage varies with the slider (storm moving through).
+  function showStormRadar(dayISO,hourUTC){
+    if(radarHistLayer){map.removeLayer(radarHistLayer);radarHistLayer=null;}
+    if(!dayISO)return radarSubsVis();
+    const hr=String(Math.max(0,Math.min(23,hourUTC==null?22:hourUTC))).padStart(2,"0");
+    const t=dayISO+"T"+hr+":30:00Z";
+    radarHistLayer=L.tileLayer.wms(IEM_REFLECT_T,{layers:"nexrad-n0q-wmst",format:"image/png",
+      transparent:true,opacity:radarOpacity(),pane:"flood",attribution:"NOAA NEXRAD / IEM",
+      TIME:t}).addTo(map);
+    radarSubsVis();
+  }
+  function clearStormRadar(){ if(radarHistLayer){map.removeLayer(radarHistLayer);radarHistLayer=null;} radarSubsVis(); hideRadarReadout(); radarGrab=null; }
+
+  // ====================================================================
+  //  Radar hover readout: sample the radar PNG pixel under the cursor and
+  //  convert its colour to a value (reflectivity -> approx in/hr, or MRMS -> inches).
+  //  WMS GetFeatureInfo isn't offered by IEM's cached layers, so we read the image.
+  // ====================================================================
+  // reference colour ramps -> value (keep in sync with radarLegendHtml)
+  const REFLECT_RAMP=[ // [r,g,b, approx rain in/hr]
+    [4,233,231,0.01],[1,159,244,0.03],[3,0,244,0.07],[2,253,2,0.15],[1,197,1,0.25],[0,142,0,0.4],
+    [253,248,2,0.6],[229,188,0,0.9],[253,149,0,1.3],[253,0,0,1.9],[212,0,0,2.6],[188,0,0,3.3],
+    [248,0,253,4.5],[152,84,198,6.0] ];
+  const MRMS_RAMP=[ // [r,g,b, inches]
+    [200,232,255,0.1],[111,176,232,0.4],[47,158,68,0.8],[183,224,0,1.3],[255,224,0,2.0],
+    [255,140,0,3.0],[224,0,0,4.0],[138,43,226,6.0] ];
+  function nearestVal(ramp,r,g,b){
+    let best=null,bd=1e9;
+    for(const c of ramp){ const dr=r-c[0],dg=g-c[1],db=b-c[2]; const d=dr*dr+dg*dg+db*db;
+      if(d<bd){bd=d;best=c;} }
+    // generous tolerance: radar PNGs are anti-aliased so blended colours sit between ramp steps
+    return (bd<=9000)?best[3]:null;
+  }
+  let radarGrab=null;          // {img, bounds} cached GetMap for the current view/time
+  let radarGrabKey="";
+  let radarReadoutEl=null, radarHoverPending=false, radarHoverEvt=null;
+  function activeRadarKind(){
+    if(radarHistLayer) return "reflect";
+    if(show.radarMrms) return "mrms";
+    if(show.radarLive) return "reflect";
+    return null;
+  }
+  function radarReadoutBox(){
+    if(!radarReadoutEl){
+      radarReadoutEl=document.createElement("div");
+      radarReadoutEl.style.cssText="position:absolute;z-index:701;display:none;pointer-events:none;"+
+        "background:rgba(21,50,79,.95);color:#fff;font-size:11.5px;font-weight:600;padding:3px 8px;"+
+        "border-radius:6px;white-space:nowrap;box-shadow:0 1px 6px rgba(0,0,0,.4)";
+      (document.getElementById("map")||document.body).appendChild(radarReadoutEl);
+    }
+    return radarReadoutEl;
+  }
+  function hideRadarReadout(){ if(radarReadoutEl)radarReadoutEl.style.display="none"; }
+  // Fetch one radar image covering the current map bounds (EPSG:3857) into a canvas we can read.
+  function ensureRadarGrab(){
+    const kind=activeRadarKind(); if(!kind){radarGrab=null;return;}
+    const b=map.getBounds(), sw=L.CRS.EPSG3857.project(b.getSouthWest()), ne=L.CRS.EPSG3857.project(b.getNorthEast());
+    const W=640,H=440;   // higher res so the hover reading lines up with the coloured cells
+    const bbox=sw.x+","+sw.y+","+ne.x+","+ne.y;
+    let url;
+    if(kind==="mrms"){
+      url=IEM_MRMS+"SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&LAYERS=mrms_p24h&STYLES=&FORMAT=image/png&TRANSPARENT=true&SRS=EPSG:3857&BBOX="+bbox+"&WIDTH="+W+"&HEIGHT="+H;
+    } else if(radarHistLayer){
+      const t=radarHistLayer.wmsParams&&radarHistLayer.wmsParams.TIME;
+      url=IEM_REFLECT_T+"SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&LAYERS=nexrad-n0q-wmst&STYLES=&FORMAT=image/png&TRANSPARENT=true&SRS=EPSG:3857&BBOX="+bbox+"&WIDTH="+W+"&HEIGHT="+H+(t?("&TIME="+encodeURIComponent(t)):"");
+    } else {
+      url=IEM_REFLECT+"SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&LAYERS=nexrad-n0q&STYLES=&FORMAT=image/png&TRANSPARENT=true&SRS=EPSG:3857&BBOX="+bbox+"&WIDTH="+W+"&HEIGHT="+H+"&_ts="+Math.floor(Date.now()/300000);
+    }
+    const key=kind+"|"+bbox+"|"+url.slice(-40);
+    if(key===radarGrabKey && radarGrab) return;   // already have this view
+    radarGrabKey=key;
+    const img=new Image(); img.crossOrigin="anonymous";
+    img.onload=()=>{ try{
+        const cv=document.createElement("canvas"); cv.width=W; cv.height=H;
+        const cx=cv.getContext("2d"); cx.drawImage(img,0,0,W,H);
+        radarGrab={data:cx.getImageData(0,0,W,H).data, W:W, H:H,
+                   mx0:sw.x, mx1:ne.x, my0:sw.y, my1:ne.y, kind:kind};
+      }catch(e){ radarGrab=null; } };
+    img.onerror=()=>{ radarGrab=null; };
+    img.src=url;
+  }
+  function radarValueAt(latlng){
+    const g=radarGrab; if(!g)return null;
+    // project the cursor the SAME way as the image BBOX (Web Mercator) so it lines up exactly
+    const p=L.CRS.EPSG3857.project(latlng);
+    const fx=(p.x-g.mx0)/(g.mx1-g.mx0);
+    const fy=(g.my1-p.y)/(g.my1-g.my0);   // image y is top-down
+    if(fx<0||fx>1||fy<0||fy>1)return null;
+    const cx=Math.round(fx*(g.W-1)), cy=Math.round(fy*(g.H-1));
+    const ramp=(g.kind==="mrms")?MRMS_RAMP:REFLECT_RAMP;
+    // sample a small neighbourhood and take the STRONGEST echo (fills 1-px gaps / anti-aliasing)
+    let bestVal=null, anyOpaque=false;
+    for(let dy=-2;dy<=2;dy++)for(let dx=-2;dx<=2;dx++){
+      const x=cx+dx, y=cy+dy; if(x<0||x>=g.W||y<0||y>=g.H)continue;
+      const i=(y*g.W+x)*4, d=g.data;
+      if(d[i+3]<40)continue;   // transparent here
+      anyOpaque=true;
+      const v=nearestVal(ramp,d[i],d[i+1],d[i+2]);
+      if(v!=null && (bestVal==null||v>bestVal)) bestVal=v;
+    }
+    if(bestVal!=null) return {kind:g.kind, val:bestVal};
+    return {dry:true};   // only truly transparent everywhere -> no echo
+  }
+  // mousemove handler (shared with the depth readout cadence) for the radar value tooltip
+  function radarHoverMove(e){
+    if(!activeRadarKind()){ hideRadarReadout(); return; }
+    radarHoverEvt=e; if(radarHoverPending)return; radarHoverPending=true;
+    requestAnimationFrame(()=>{ radarHoverPending=false; const ev=radarHoverEvt; if(!ev)return;
+      ensureRadarGrab();
+      const r=radarValueAt(ev.latlng); const el=radarReadoutBox();
+      if(!r){ el.style.display="none"; return; }
+      let txt;
+      if(r.dry){ txt="\u2600\ufe0f radar: no rain here now"; }
+      else if(r.kind==="mrms"){ txt="\u2614 radar ~"+r.val+"\u2033 over 24 h"; }
+      else { txt="\u2614 radar rate ~"+r.val.toFixed(2)+"\u2033/hr"; }   // instantaneous rate, NOT a total
+      el.style.display="block";
+      el.style.left=(ev.containerPoint.x+16)+"px";
+      el.style.top=(ev.containerPoint.y+32)+"px";
+      el.textContent=txt;
+    });
+  }
+  map.on("mousemove",radarHoverMove);
+  map.on("mouseout",hideRadarReadout);
+  map.on("moveend zoomend",()=>{ radarGrab=null; radarGrabKey=""; });
+
   // photo gallery modal (reuses #galModal in index.html)
   let _lbList=[], _lbIdx=0;
   function openGallery(title, subtitle, images, credit, videos){
@@ -2133,32 +2712,50 @@
   (function(){const gm=document.getElementById("galModal");
     if(gm){document.getElementById("galClose").onclick=()=>gm.classList.remove("on");
       gm.onclick=e=>{if(e.target.id==="galModal")gm.classList.remove("on");};}})();
-  function repMarker(r,color){
-    const m=L.circleMarker([r.lat,r.lng],{radius:6,color:"#fff",weight:1.5,fillColor:color,fillOpacity:.95});
-    const imgs=r.images||[];
-    const n=imgs.length;
-    const evt=r.event?("<br>"+r.event):(r.when?("<br>"+r.when):"");
-    const src="<br><span style=\"color:#5d6b78\">"+(r.source||"Flood report")+"</span>";
-    let html="<b>"+(r.name||"Flood report")+"</b>"+evt+src;
+  // map a report's source string to a short badge (kind + label) so every popup clearly
+  // shows whether it came from 311, MyCoast, social media/news, or a validated photo
+  function reportSourceBadge(r){
+    const s=String(r.source||"").toLowerCase();
+    let kind="social",label="Social / news report";
+    if(/mycoast/.test(s)){kind="mycoast";label="MyCoast citizen report";}
+    else if(/311/.test(s)){kind="311";label="311 report";}
+    else if(/validated|photo/.test(s)){kind="photo";label="Validated flood photo";}
+    else if(/social|newsletter|news/.test(s)){kind="social";label="Social / news report";}
+    return '<span class="srcbadge srcbadge-'+kind+'">'+label+'</span>';
+  }
+  // Shared popup HTML for any report (used by map markers AND the per-storm source markers)
+  function reportPopupHtml(r){
+    const imgs=r.images||[]; const n=imgs.length;
+    let evt="";
+    if(r.event)evt="<br>"+r.event;
+    else if(r.when){const wn=r.whenSrc==="inferred"?' \u00b7 <i>date inferred from same location</i>':(r.whenSrc==="event"?' \u00b7 <i>documented flood event</i>':(r.whenSrc==="reported"?" \u00b7 reported date":""));
+      evt='<br><span style="color:#5d6b78">'+r.when+wn+'</span>';}
+    let html="<b>"+(r.name||"Flood report")+"</b>"+evt+"<br>"+reportSourceBadge(r);
     if(r.floodClass)html+='<br><span class="floodtag floodtag-'+r.floodClass+'">'+(r.floodClass==="coastal"?"Coastal / high-tide flooding":"Inland (rainfall) flooding")+'</span>';
     else if(r.reportType)html+="<br>"+r.reportType;
     if(r.rainIn!=null)html+='<br><span style="color:#2563eb">\u2614 '+r.rainIn+' in. of rain in the 24 h before this report</span>';
     if(n){
-      html+='<div class="repthumbwrap">';
-      html+='<img class="repthumb" src="'+imgs[0]+'" onerror="this.style.display=\'none\'">';
-      html+='</div>';
+      html+='<div class="repthumbwrap"><img class="repthumb" src="'+imgs[0]+'" onerror="this.style.display=\'none\'"></div>';
       html+='<button class="repmore" data-i="'+ridx(r)+'">'+(n>1?("See all "+n+" photos"):"View photo")+' \u25be</button>';
     }
     const vids=r.videos||[];
     if(vids.length) html+='<br><b>\u25b6 Watch flooding videos here:</b> '+vids.map((u,i)=>'<a href="'+u+'" target="_blank" rel="noopener">'+vidLabel(u,i)+'</a>').join(" &nbsp;\u00b7&nbsp; ");
     if(r.url)html+='<br><a href="'+r.url+'" target="_blank" rel="noopener">Open original report</a>';
-    m.bindPopup(html,{maxWidth:270});
+    return html;
+  }
+  // Wire the "see all photos" / thumbnail click inside an already-open popup content node
+  function wireReportPopup(node,r){
+    if(!node)return;
+    const imgs=r.images||[], vids=r.videos||[];
     const openG=()=>openGallery(r.name||"Reported flooding",
         (r.event||r.when||"")+(r.source?(" \u00b7 "+r.source):""), imgs, r.credit||"", vids);
-    m.on("popupopen",ev=>{
-      const b=ev.popup._contentNode.querySelector(".repmore"); if(b)b.onclick=openG;
-      const th=ev.popup._contentNode.querySelector(".repthumb"); if(th){th.style.cursor="pointer";th.onclick=openG;}
-    });
+    const b=node.querySelector(".repmore"); if(b)b.onclick=openG;
+    const th=node.querySelector(".repthumb"); if(th){th.style.cursor="pointer";th.onclick=openG;}
+  }
+  function repMarker(r,color){
+    const m=L.circleMarker([r.lat,r.lng],{radius:6,color:"#fff",weight:1.5,fillColor:color,fillOpacity:.95});
+    m.bindPopup(reportPopupHtml(r),{maxWidth:270});
+    m.on("popupopen",ev=>wireReportPopup(ev.popup._contentNode,r));
     return m;
   }
   const _allrep=[]; function ridx(r){let i=_allrep.indexOf(r); if(i<0){i=_allrep.push(r)-1;} return i;}
@@ -2213,6 +2810,9 @@
         out.push(rec);});
       if(out.length){MYC=out;}   // use fresh data if we got any
     }catch(e){busy(false);/* keep baked fallback */}
+    // fresh MyCoast dates may add new community-reported storm events (e.g. 2026) -> rebuild
+    buildCommunityStorms();
+    if(show.storms){ renderStormList(); if(selStorm)renderStormSrcLegend(); }
     if(show.mycoast)drawMyCoast();
   }
   function drawMyCoast(){
@@ -2248,10 +2848,10 @@
   function camInBeltway(lat,lng){return lat!=null&&lng!=null&&lat>=39.19&&lat<=39.45&&lng>=-76.76&&lng<=-76.46;}
   async function refreshCamerasLive(){
     if(camLiveTried)return; camLiveTried=true;
-    try{
-      busy(true);
-      const data=await fetch(CAM_LIVE).then(r=>r.json());
-      busy(false);
+    busy(true);
+    const data=await fetchChart(CAM_LIVE);   // direct then CORS-proxy fallback (CHART has no CORS)
+    busy(false);
+    {
       const rows=(data&&data.data)||[];
       const live=[];
       rows.forEach(c=>{let lat=c.lat,lng=c.lon; if(lat==null||lng==null)return;
@@ -2259,8 +2859,8 @@
         live.push({id:c.id,name:(c.description||c.name||"Traffic camera").trim(),lat:+lat.toFixed(6),lng:+lng.toFixed(6),
           video:c.publicVideoURL||"",route:((c.routePrefix||"")+" "+(c.routeNumber||"")).trim(),
           online:String(c.opStatus||"").toUpperCase()==="OK",updated:c.lastCachedDataUpdateTime||c.lastUpdate||0});});
-      if(live.length){CAM=live;}        // use fresh list if we got one
-    }catch(e){busy(false);/* keep baked fallback */}
+      if(live.length){CAM=live;}        // use fresh list if we got one (else keep baked fallback)
+    }
     if(show.cameras)drawCameras();
   }
   function drawCameras(){
@@ -2283,22 +2883,46 @@
       m.addTo(camLayer);
     });
   }
-  // ---------- live weather stations (MDOT CHART RWIS) : precipitation focus ----------
+  // ---------- live weather stations (Maryland RWIS) : precipitation focus ----------
+  // Primary LIVE source: Iowa Environmental Mesonet (IEM) MD_RWIS "currents" API -- the same
+  // Maryland road-weather stations as CHART, but CORS-enabled + keyless (CHART itself sends no
+  // CORS header, so a direct browser fetch is blocked and only ever showed the baked snapshot).
   const wxLayer=L.layerGroup();
   let WX=(typeof CHART_WEATHER!=="undefined")?CHART_WEATHER.slice():[]; let wxTried=false; // baked fallback
-  const WX_LIVE="https://chartexp1.sha.maryland.gov/CHARTExportClientService/getRWISMapDataJSON.do";
+  let wxLive=false;   // did the LIVE refresh succeed this session? (controls the popup label)
+  const WX_IEM="https://mesonet.agron.iastate.edu/api/1/currents.json?network=MD_RWIS";
+  const CHART_URL="https://chartexp1.sha.maryland.gov/CHARTExportClientService/getRWISMapDataJSON.do";
+  // CHART (used only for the camera list) has no CORS header: try direct, then a keyless proxy.
+  async function fetchChart(url){
+    try{ const r=await fetchJSON(url,12000); if(r&&r.data)return r; }catch(e){}
+    try{ const r=await fetchJSON("https://api.allorigins.win/raw?url="+encodeURIComponent(url),15000); if(r&&r.data)return r; }catch(e){}
+    return null;
+  }
+  // turn IEM fields into a readable "precipitation" status string
+  function iemPrecip(s){
+    const ph=(s.phour!=null&&s.phour!=="")?parseFloat(s.phour):null;
+    if(ph!=null&&isFinite(ph)&&ph>0) return ph.toFixed(2)+" in (past hr)";
+    const sc=(s.scond0||"").toString();            // surface condition: Dry / Wet / etc.
+    if(/wet|rain|snow|ice|slush|chemical/i.test(sc)) return sc;
+    if(/dry/i.test(sc)) return "None (surface dry)";
+    return "No Data Available";
+  }
   async function refreshWeatherLive(){
     if(wxTried)return; wxTried=true;
-    try{
-      busy(true);
-      const data=await fetch(WX_LIVE).then(r=>r.json());
-      busy(false);
-      const rows=(data&&data.data)||[];
-      WX=rows.filter(s=>s.lat!=null&&s.lon!=null&&camInBeltway(+s.lat,+s.lon)).map(s=>({
-        id:s.id,name:(s.name||s.description||"Weather station").trim(),lat:+(+s.lat).toFixed(6),lng:+(+s.lon).toFixed(6),
-        precip:s.precipitationType||"No Data Available",air:s.airTemp||"",rh:s.relativeHumidity||"",
-        wind:s.windDescription||"",updated:s.lastUpdate||s.lastCachedDataUpdateTime||0}));
-    }catch(e){busy(false);}
+    busy(true);
+    let j=null; try{ j=await fetchJSON(WX_IEM,15000); }catch(e){}
+    busy(false);
+    const rows=(j&&j.data)||[];
+    if(rows.length){
+      const live=rows.filter(s=>s.lat!=null&&s.lon!=null&&camInBeltway(+s.lat,+s.lon)).map(s=>({
+        id:s.station,name:(s.name||"Weather station").trim(),lat:+(+s.lat).toFixed(6),lng:+(+s.lon).toFixed(6),
+        precip:iemPrecip(s),
+        air:(s.tmpf!=null&&isFinite(s.tmpf))?(Math.round(s.tmpf)+"F"):"",
+        rh:(s.relh!=null&&isFinite(s.relh))?(Math.round(s.relh)+"%"):"",
+        wind:(s.sknt!=null&&isFinite(s.sknt))?(Math.round(s.sknt*1.151)+" MPH"+(s.gust?(" (gust "+Math.round(s.gust*1.151)+")"):"")):"",
+        updated:s.utc_valid?Date.parse(s.utc_valid):0}));
+      if(live.length){ WX=live; wxLive=true; }
+    }
     if(show.weather)drawWeather();
   }
   function drawWeather(){
@@ -2313,18 +2937,119 @@
       const m=L.marker([s.lat,s.lng],{icon:L.divIcon({className:"wxdiv",
         html:'<div class="wxpin" style="background:'+col+'" title="Live weather station">\u2614</div>',
         iconSize:[24,24],iconAnchor:[12,12]})});
-      let html='<b>'+s.name+'</b><br><span style="color:#5d6b78">MDOT CHART weather station (RWIS)</span>';
+      let html='<b>'+s.name+'</b><br><span style="color:#5d6b78">Maryland road-weather station (RWIS)</span>';
       html+='<br><b>Precipitation:</b> '+(s.precip||"\u2014");
       if(s.air)html+='<br>Air temp: '+s.air;
       if(s.rh)html+='<br>Humidity: '+s.rh;
       if(s.wind)html+='<br>Wind: '+s.wind;
-      if(s.updated)html+='<br><span style="color:#5d6b78">Updated '+stamp(s.updated)+' ('+agoLabel(s.updated)+')</span>';
-      html+='<br><span style="color:#94a3b8;font-size:11px">CHART reports precipitation type (rain/none), not amount in inches.</span>';
-      m.bindPopup(html,{maxWidth:260});
+      if(s.updated)html+='<br><span style="color:#5d6b78">Reading: '+stamp(s.updated)+' ('+agoLabel(s.updated)+')</span>';
+      // Honest live vs. snapshot status
+      html+= wxLive
+        ? '<br><span style="color:#0f766e;font-size:11px;font-weight:700">\u25cf Live \u2014 via Iowa Environmental Mesonet (IEM)</span>'
+        : '<br><span style="color:#b4690a;font-size:11px;font-weight:700">\u25cf Saved snapshot \u2014 couldn\u2019t reach the live feed just now</span>';
+      html+='<br><span style="color:#94a3b8;font-size:11px">RWIS reports surface condition (dry/wet) and, when available, hourly precip in inches.</span>';
+      m.bindPopup(html,{maxWidth:270});
       m.addTo(wxLayer);
     });
   }
   // ---------- FEMA NFIP flood-insurance claims by ZIP (ZCTA choropleth) ----------
+  // ============================================================================
+  //  Inline time-series chart (SVG) for station popups.
+  //  Draws one or more series (e.g. observed water level + tide prediction) plus
+  //  optional horizontal threshold bands (minor/moderate/major flooding), styled
+  //  after the NOAA Tides & Currents inundation graphs.
+  // ============================================================================
+  // parse "YYYY-MM-DD HH:MM" (CO-OPS) or ISO (USGS) to epoch ms
+  function _tms(t){ if(!t)return NaN; let s=String(t).replace(" ","T"); const v=Date.parse(s); return isNaN(v)?Date.parse(t):v; }
+  // fetch JSON with a hard timeout so a slow/unreachable station API can't spin forever
+  function fetchJSON(url, ms){
+    ms=ms||25000;
+    const ctl=(typeof AbortController!=="undefined")?new AbortController():null;
+    const t=setTimeout(()=>{ if(ctl)ctl.abort(); }, ms);
+    return fetch(url, ctl?{signal:ctl.signal}:{})
+      .then(r=>{ if(!r.ok) throw new Error("HTTP "+r.status); return r.json(); })
+      .finally(()=>clearTimeout(t));
+  }
+  // series = [{pts:[[ms,val]...], color, width, dash, label}]
+  // bands  = [{y,color,label}] horizontal lines; fills = [{y0,y1,color}]
+  function tsChartSVG(series, opt){
+    opt=opt||{}; const W=opt.w||320, H=opt.h||150;
+    const padL=34, padR=8, padT=8, padB=20;
+    const all=[]; series.forEach(s=>s.pts.forEach(p=>{ if(p[1]!=null&&isFinite(p[1]))all.push(p); }));
+    if(!all.length) return '<div style="color:#94a3b8;font-size:11px;padding:6px">No recent data to chart.</div>';
+    let xmin=Infinity,xmax=-Infinity,ymin=Infinity,ymax=-Infinity;
+    all.forEach(p=>{ if(p[0]<xmin)xmin=p[0]; if(p[0]>xmax)xmax=p[0]; if(p[1]<ymin)ymin=p[1]; if(p[1]>ymax)ymax=p[1]; });
+    (opt.fills||[]).forEach(f=>{ if(f.y0!=null){ymin=Math.min(ymin,f.y0);ymax=Math.max(ymax,f.y0);} if(f.y1!=null){ymin=Math.min(ymin,f.y1);ymax=Math.max(ymax,f.y1);} });
+    (opt.bands||[]).forEach(b=>{ if(b.y!=null){ymin=Math.min(ymin,b.y);ymax=Math.max(ymax,b.y);} });
+    if(xmax<=xmin)xmax=xmin+1; const yr=(ymax-ymin)||1; ymin-=yr*0.08; ymax+=yr*0.08;
+    const X=t=>padL+(W-padL-padR)*(t-xmin)/(xmax-xmin);
+    const Y=v=>padT+(H-padT-padB)*(1-(v-ymin)/(ymax-ymin));
+    let svg='<svg width="'+W+'" height="'+H+'" viewBox="0 0 '+W+' '+H+'" style="display:block">';
+    svg+='<rect x="'+padL+'" y="'+padT+'" width="'+(W-padL-padR)+'" height="'+(H-padT-padB)+'" fill="#fff" stroke="#e2e8f0"/>';
+    // threshold fills (coloured bands up to top)
+    (opt.fills||[]).forEach(f=>{ const y1=Y(Math.max(f.y1,ymin)), y0=Y(Math.min(f.y0,ymax));
+      svg+='<rect x="'+padL+'" y="'+Math.min(y0,y1)+'" width="'+(W-padL-padR)+'" height="'+Math.abs(y0-y1)+'" fill="'+f.color+'" opacity="0.5"/>'; });
+    // y gridlines + labels (4)
+    for(let i=0;i<=4;i++){ const v=ymin+(ymax-ymin)*i/4, y=Y(v);
+      svg+='<line x1="'+padL+'" y1="'+y+'" x2="'+(W-padR)+'" y2="'+y+'" stroke="#eef2f6"/>';
+      svg+='<text x="'+(padL-3)+'" y="'+(y+3)+'" font-size="8.5" fill="#64748b" text-anchor="end">'+v.toFixed(1)+'</text>'; }
+    // x labels (start / mid / end) as day labels
+    [xmin,(xmin+xmax)/2,xmax].forEach((t,i)=>{ const d=new Date(t);
+      const lab=(MON[d.getMonth()]+" "+d.getDate());
+      const anc=i===0?"start":(i===2?"end":"middle");
+      svg+='<text x="'+X(t)+'" y="'+(H-6)+'" font-size="8.5" fill="#64748b" text-anchor="'+anc+'">'+lab+'</text>'; });
+    // threshold dashed lines + labels
+    (opt.bands||[]).forEach(b=>{ if(b.y==null||b.y<ymin||b.y>ymax)return; const y=Y(b.y);
+      svg+='<line x1="'+padL+'" y1="'+y+'" x2="'+(W-padR)+'" y2="'+y+'" stroke="'+(b.color||"#dc2626")+'" stroke-width="1" stroke-dasharray="4 3"/>';
+      if(b.label)svg+='<text x="'+(padL+3)+'" y="'+(y-2)+'" font-size="8" fill="'+(b.color||"#dc2626")+'">'+b.label+'</text>'; });
+    // series polylines
+    series.forEach(s=>{ const pts=s.pts.filter(p=>p[1]!=null&&isFinite(p[1]));
+      if(!pts.length)return; const d=pts.map(p=>X(p[0]).toFixed(1)+","+Y(p[1]).toFixed(1)).join(" ");
+      svg+='<polyline points="'+d+'" fill="none" stroke="'+(s.color||"#0369a1")+'" stroke-width="'+(s.width||1.6)+'"'+(s.dash?' stroke-dasharray="'+s.dash+'"':'')+' stroke-linejoin="round"/>'; });
+    svg+='</svg>';
+    // legend
+    let leg='<div style="display:flex;flex-wrap:wrap;gap:8px;font-size:10px;color:#475569;margin-top:2px">';
+    series.forEach(s=>{ if(!s.label)return; leg+='<span style="display:inline-flex;align-items:center;gap:3px">'+
+      '<span style="width:14px;height:0;border-top:'+(s.width||2)+'px '+(s.dash?"dashed":"solid")+' '+(s.color||"#0369a1")+'"></span>'+s.label+'</span>'; });
+    leg+='</div>';
+    return svg+leg;
+  }
+  // Robust async popup: on EVERY open, rebuild the whole popup via setContent().
+  //  headFn() -> static header HTML (shown immediately with a "loading" line)
+  //  buildFn() -> Promise<string> of the chart HTML (replaces the loading line)
+  // Using setContent (not querySelector into the DOM) avoids the stale-node / _done bugs
+  // that left the popup stuck on "Loading".
+  function popupChart(marker, headFn, buildFn){
+    const render=(popup,body)=>{ try{popup.setContent(headFn()+body);}catch(e){} };
+    marker.on("popupopen",ev=>{
+      const popup=ev.popup;
+      render(popup,'<div style="margin-top:6px;font-size:11px;color:#64748b">\u23f3 Loading\u2026 (a few seconds)</div>');
+      let settled=false;
+      const finish=body=>{ if(settled)return; settled=true; render(popup,body); };
+      const guard=setTimeout(()=>finish('<div style="color:#b45309;font-size:11px;margin-top:6px">The data service is slow right now \u2014 close and reopen to retry.</div>'),20000);
+      Promise.resolve().then(buildFn)
+        .then(html=>{ clearTimeout(guard); finish(html); })
+        .catch(()=>{ clearTimeout(guard); finish('<div style="color:#b45309;font-size:11px;margin-top:6px">Could not load the chart \u2014 close and reopen to retry.</div>'); });
+    });
+  }
+  // USGS gage-height (00065) + streamflow (00060) time-series over the past 3 days.
+  // Caches the PROMISE (not just the result) so clicking a marker reuses the background
+  // prefetch instead of starting a new request -> the chart is usually ready instantly.
+  const _usgsCache={};
+  function usgsSeries(siteId){
+    if(_usgsCache[siteId])return _usgsCache[siteId];
+    const u="https://waterservices.usgs.gov/nwis/iv/?format=json&sites="+siteId+"&parameterCd=00065,00060&period=P3D";
+    const pr=fetchJSON(u).then(d=>{
+      const out={gh:[],flow:[]};
+      (d.value&&d.value.timeSeries||[]).forEach(t=>{
+        const vc=t.variable.variableCode[0].value, vals=(t.values[0]&&t.values[0].value)||[];
+        const arr=vals.map(v=>[_tms(v.dateTime),+v.value]).filter(p=>isFinite(p[0])&&p[1]!==-999999&&isFinite(p[1]));
+        if(vc==="00065")out.gh=arr; if(vc==="00060")out.flow=arr;
+      });
+      return out;
+    }).catch(e=>{ delete _usgsCache[siteId]; throw e; });   // drop on failure so a retry refetches
+    _usgsCache[siteId]=pr; return pr;
+  }
   // ---------- USGS stream gauges (live gage height + streamflow) ----------
   const usgsLayer=L.layerGroup();
   let USG=(typeof USGS_GAUGES!=="undefined")?USGS_GAUGES.slice():[]; let usgsTried=false;
@@ -2358,12 +3083,30 @@
       if(!fcPass(s.lat,s.lng))return;   // forecast focus
       const m=L.marker([s.lat,s.lng],{icon:L.divIcon({className:"usgsdiv",
         html:'<div class="usgspin" title="USGS stream gauge">\u25B2</div>',iconSize:[22,22],iconAnchor:[11,11]})});
-      let html='<b>'+s.name+'</b><br><span style="color:#5d6b78">USGS stream gauge #'+s.id+'</span>';
-      if(s.gageHt!=null)html+='<br><b>Gage height:</b> '+s.gageHt+' ft';
-      if(s.flow!=null)html+='<br>Streamflow: '+s.flow+' ft\u00b3/s';
-      if(s.when)html+='<br><span style="color:#5d6b78">Reading: '+stamp(Date.parse(s.when))+' ('+agoLabel(Date.parse(s.when))+')</span>';
-      html+='<br><a href="https://waterdata.usgs.gov/monitoring-location/'+s.id+'/" target="_blank" rel="noopener">USGS site page</a>';
-      m.bindPopup(html,{maxWidth:250}); m.addTo(usgsLayer);
+      const headFn=()=>{
+        let h='<b>'+s.name+'</b><br><span style="color:#5d6b78">USGS stream gauge #'+s.id+'</span>';
+        if(s.gageHt!=null)h+='<br><b>Gage height:</b> '+s.gageHt+' ft';
+        if(s.flow!=null)h+='<br>Streamflow: '+s.flow+' ft\u00b3/s';
+        if(s.when)h+='<br><span style="color:#5d6b78">Reading: '+stamp(Date.parse(s.when))+' ('+agoLabel(Date.parse(s.when))+')</span>';
+        h+='<br><a href="https://waterdata.usgs.gov/monitoring-location/'+s.id+'/" target="_blank" rel="noopener">USGS site page</a>';
+        return h;
+      };
+      m.bindPopup('<b>'+s.name+'</b>',{maxWidth:470,minWidth:450});
+      popupChart(m,headFn,async()=>{
+        const d=await usgsSeries(s.id);
+        if(!d.gh.length&&!d.flow.length)return '<div style="color:#94a3b8;font-size:11px;margin-top:6px">No recent time series published for this gauge.</div>';
+        let out='';
+        if(d.gh.length){
+          out+='<div style="font-size:12px;font-weight:700;color:#0369a1;margin:6px 0 1px">Gage height (ft), past 3 days</div>'+
+            tsChartSVG([{pts:d.gh,color:"#0369a1",width:1.8,label:"Gage height (ft)"}],{w:430,h:185});
+        }
+        if(d.flow.length){
+          out+='<div style="font-size:12px;font-weight:700;color:#0d9488;margin:8px 0 1px">Streamflow (ft\u00b3/s), past 3 days</div>'+
+            tsChartSVG([{pts:d.flow,color:"#0d9488",width:1.8,label:"Streamflow (ft\u00b3/s)"}],{w:430,h:155});
+        }
+        return out;
+      });
+      m.addTo(usgsLayer);
     });
   }
   // ---------- NOAA / NWS weather stations (live obs + precipitation) ----------
@@ -2413,6 +3156,84 @@
       if(s.rh!=null)html+='<br>Humidity: '+Math.round(s.rh)+'%';
       if(s.when)html+='<br><span style="color:#5d6b78">Observed '+stamp(Date.parse(s.when))+' ('+agoLabel(Date.parse(s.when))+')</span>';
       m.bindPopup(html,{maxWidth:250}); m.addTo(noaaLayer);
+    });
+  }
+  // ---------- NOAA tide / observed water-level stations (CO-OPS) ----------
+  // Shows the harbor/tidal gauges near Baltimore. Data is pulled LIVE and DIRECTLY from the
+  // NOAA CO-OPS APIs (water_level, predictions, floodlevels, datums) -- not scraped from any
+  // dashboard -- and charted here with the NWS minor/moderate/major flood thresholds. Keyless/CORS.
+  const tideLayer=L.layerGroup();
+  const TIDE_STATIONS=[
+    {id:"8574680",name:"Baltimore (Inner Harbor)",lat:39.2667,lng:-76.5783},
+    {id:"8573364",name:"Tolchester Beach, MD",lat:39.2133,lng:-76.2450},
+    {id:"8575512",name:"Annapolis, MD",lat:38.9833,lng:-76.4817},
+    {id:"8571892",name:"Cambridge, MD",lat:38.5733,lng:-76.0617}
+  ];
+  // Use the CURRENT CO-OPS endpoint (/api/prod/datagetter). The old /api/datagetter path
+  // now 403s / redirects, which is why the tide graph used to hang in the tool.
+  const CO_OPS="https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?";
+  const CO_MD ="https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations/";
+  function coUrl(product,station,extra){
+    return CO_OPS+"product="+product+"&application=floodlens&station="+station+
+      "&time_zone=lst_ldt&units=english&format=json&datum=MHHW"+(extra||"");
+  }
+  // Caches the PROMISE so background prefetch + popup share one request.
+  const _tideCache={};
+  function tideData(station){
+    if(_tideCache[station])return _tideCache[station];
+    // observed + prediction (72 h), thresholds, datums. Each call has its own timeout + catch,
+    // so the chart renders from whatever came back instead of waiting on the slowest one.
+    const pr=Promise.all([
+      fetchJSON(coUrl("water_level",station,"&date=recent"),15000).catch(()=>null),
+      fetchJSON(coUrl("predictions",station,"&date=recent&interval=h"),15000).catch(()=>null),
+      fetchJSON(CO_MD+station+"/floodlevels.json",15000).catch(()=>null),
+      fetchJSON(CO_MD+station+"/datums.json",15000).catch(()=>null)
+    ]).then(([obs,pred,fl,dat])=>{
+      const o=((obs&&obs.data)||[]).map(d=>[_tms(d.t),+d.v]).filter(p=>isFinite(p[0])&&isFinite(p[1]));
+      const p=((pred&&pred.predictions)||[]).map(d=>[_tms(d.t),+d.v]).filter(q=>isFinite(q[0])&&isFinite(q[1]));
+      // flood thresholds are given on STND datum; convert to MHHW by subtracting MHHW value
+      let mhhw=null;
+      if(dat&&dat.datums){const m=dat.datums.find(x=>x.name==="MHHW"); if(m)mhhw=+m.value;}
+      const toMHHW=v=>(v==null||mhhw==null)?null:(v-mhhw);
+      const th=fl?{minor:toMHHW(fl.nws_minor!=null?fl.nws_minor:fl.nos_minor),
+                   moderate:toMHHW(fl.nws_moderate!=null?fl.nws_moderate:fl.nos_moderate),
+                   major:toMHHW(fl.nws_major!=null?fl.nws_major:fl.nos_major)}:null;
+      const last=o.length?o[o.length-1]:null;
+      if(!o.length&&!p.length) delete _tideCache[station];   // nothing came back -> allow retry
+      return {obs:o,pred:p,th,last};
+    }).catch(e=>{ delete _tideCache[station]; throw e; });
+    _tideCache[station]=pr; return pr;
+  }
+  function drawTide(){
+    tideLayer.clearLayers();
+    if(!show.tide){if(map.hasLayer(tideLayer))map.removeLayer(tideLayer);return;}
+    if(!map.hasLayer(tideLayer))tideLayer.addTo(map);
+    TIDE_STATIONS.forEach(s=>{
+      if(!fcPass(s.lat,s.lng))return;
+      const m=L.marker([s.lat,s.lng],{icon:L.divIcon({className:"tidediv",
+        html:'<div class="tidepin" title="NOAA tide / water-level gauge">\u301c</div>',iconSize:[24,24],iconAnchor:[12,12]})});
+      const headFn=()=>'<b>'+s.name+'</b><br><span style="color:#5d6b78">NOAA Tides &amp; Currents (CO-OPS) station '+s.id+'</span>'+
+        '<br><a href="https://tidesandcurrents.noaa.gov/stationhome.html?id='+s.id+'" target="_blank" rel="noopener">Open this station on NOAA</a>';
+      m.bindPopup('<b>'+s.name+'</b>',{maxWidth:470,minWidth:450});
+      popupChart(m,headFn,async()=>{
+        const d=await tideData(s.id);
+        if(!d.obs.length&&!d.pred.length)return '<div style="color:#94a3b8;font-size:11px;margin-top:6px">No recent water-level data for this station.</div>';
+        const series=[];
+        if(d.pred.length)series.push({pts:d.pred,color:"#1d4ed8",width:1.4,label:"Predicted tide"});
+        if(d.obs.length)series.push({pts:d.obs,color:"#dc2626",width:1.8,label:"Observed"});
+        const bands=[],fills=[];
+        if(d.th){
+          if(d.th.minor!=null){bands.push({y:d.th.minor,color:"#d4a017",label:"Minor "+d.th.minor.toFixed(1)+"\u2032"});fills.push({y0:d.th.minor,y1:(d.th.moderate!=null?d.th.moderate:d.th.minor+1),color:"#ffe08a"});}
+          if(d.th.moderate!=null){bands.push({y:d.th.moderate,color:"#ea580c",label:"Moderate "+d.th.moderate.toFixed(1)+"\u2032"});fills.push({y0:d.th.moderate,y1:(d.th.major!=null?d.th.major:d.th.moderate+1),color:"#ffb199"});}
+          if(d.th.major!=null){bands.push({y:d.th.major,color:"#be185d",label:"Major "+d.th.major.toFixed(1)+"\u2032"});fills.push({y0:d.th.major,y1:d.th.major+2,color:"#f5a3d0"});}
+        }
+        let head='';
+        if(d.last)head='<div style="font-size:12px;margin-bottom:2px"><b>Latest observed:</b> '+d.last[1].toFixed(2)+'\u2032 (MHHW) \u00b7 '+stamp(d.last[0])+'</div>';
+        const chart=tsChartSVG(series,{w:440,h:215,bands,fills});
+        const note='<div style="font-size:9.5px;color:#94a3b8;margin-top:2px">Heights in feet above MHHW. Thresholds = NWS minor/moderate/major flood stage. Source: NOAA Tides &amp; Currents.</div>';
+        return head+chart+note;
+      });
+      m.addTo(tideLayer);
     });
   }
   // ---------- FEMA NFIP flood-insurance claims by ZIP (ZCTA choropleth) ----------
@@ -2732,6 +3553,7 @@
       case "weather": return WX;
       case "usgs":    return USG;
       case "noaa":    return NOA;
+      case "tide":    return TIDE_STATIONS;
       case "fl311":   return (LIVE.fl311&&LIVE.fl311.features)?LIVE.fl311.features.map(f=>({lat:f.geometry.coordinates[1],lng:f.geometry.coordinates[0]})):null;
       case "wb311":   return (LIVE.wb311&&LIVE.wb311.features)?LIVE.wb311.features.map(f=>({lat:f.geometry.coordinates[1],lng:f.geometry.coordinates[0]})):null;
       default: return undefined;   // not a point layer we gate
@@ -2739,7 +3561,7 @@
   }
   const LAYER_LABEL={reports:"Validated flood photos",social:"Social media & newsletter reports",
     mycoast:"MyCoast reports",closures:"Flood-related road closures",cameras:"Live traffic cameras",
-    weather:"CHART weather stations",usgs:"USGS stream gauges",noaa:"NOAA/NWS stations",
+    weather:"CHART weather stations",usgs:"USGS stream gauges",noaa:"NOAA/NWS stations",tide:"NOAA tide / water-level gauges",
     claims:"Flood-insurance claims",fl311:"311 flooded-street reports",wb311:"311 water-in-basement reports",
     streams:"Streams",streamGrid:"StreamStats grid",landcover:"Land cover",soil:"Soil groups",fema:"FEMA flood hazard"};
   // after a layer is turned on with a forecast focus active, warn if nothing is in the area
@@ -2777,11 +3599,35 @@
   lyr("lReports","reports",drawReports);
   lyr("lSocial","social",drawSocial);
   lyr("lMyCoast","mycoast",drawMyCoast);
+  // Past storms: toggle shows the sub-panel + list; selecting a storm maps its flooded streets
+  lyr("lStorms","storms",()=>{
+    const sub=document.getElementById("stormSubs"); if(sub)sub.style.display=show.storms?"block":"none";
+    if(show.storms){ if(!mycTried)refreshMyCoastLive();   // pull live MyCoast so recent (incl. 2026) community events appear
+      renderStormList(); drawStorm(); renderStormTimeline(); renderStormRadarBtn(); }
+    else { if(map.hasLayer(stormLayer))map.removeLayer(stormLayer); clearStormRadar(); stopStormPlay(); hideStormClock();
+           ["stormRadar","stormTimeline","stormSrcLegend"].forEach(id=>{const b=document.getElementById(id); if(b){b.style.display="none";b.innerHTML="";}}); }
+  });
+  (function(){
+    const s=document.getElementById("stormSearch"), sv=document.getElementById("stormSev");
+    if(s)s.oninput=renderStormList;
+    if(sv)sv.onchange=renderStormList;
+  })();
+  // radar rainfall toggles + opacity
+  lyr("lRadarLive","radarLive",drawRadarLive);
+  lyr("lRadarMrms","radarMrms",drawRadarMrms);
+  (function(){
+    const o=document.getElementById("radarOpacity");
+    if(o)o.oninput=()=>{ const v=radarOpacity();
+      if(radarLiveLayer)radarLiveLayer.setOpacity(v);
+      if(radarMrmsLayer)radarMrmsLayer.setOpacity(v);
+      if(radarHistLayer)radarHistLayer.setOpacity(v); };
+  })();
   lyr("lClosures","closures",drawClosures);
   lyr("lCameras","cameras",drawCameras);
   lyr("lWeather","weather",drawWeather);
   lyr("lUsgs","usgs",drawUsgs);
   lyr("lNoaa","noaa",drawNoaa);
+  lyr("lTide","tide",drawTide);
   lyr("lClaims","claims",drawClaims);
   lyr("lHist","hist",drawHist);
   lyr("lInfra","infra",()=>{

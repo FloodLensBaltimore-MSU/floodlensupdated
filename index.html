@@ -24,7 +24,7 @@
     Census socio-economics     - BNIA / US DOT BTS (ACS)
   Flood depths remain the synthetic demo model until CityCAT rasters are wired in.
 -->
-<link rel="stylesheet" href="styles.css?v=v25">
+<link rel="stylesheet" href="styles.css?v=v40">
 </head>
 <body>
 <div class="topbar">
@@ -128,6 +128,45 @@
         <label><input type="checkbox" id="l311wb"><span class="dotk" style="background:#7c3aed;border-radius:50%"></span> Water in basement
           <span class="info" title="Locations where residents called 311 to report water in their basement (Open Baltimore 311, 2010–2025 where available).">i</span></label>
 
+        <div class="lp-sec">Past storms (2010&ndash;2025)</div>
+        <label><input type="checkbox" id="lStorms"> Past severe storms &amp; flooding
+          <span class="info" title="Baltimore 311 flooded-street reports grouped into storm events (2010-2025). Each storm is rated by how many streets flooded and the peak daily rainfall (Open-Meteo, BWI). Turn on, then pick a storm from the list to see the streets that flooded that day. Reporting-biased; indicative, not engineering-grade.">i</span></label>
+        <div class="subs" id="stormSubs" style="display:none">
+          <div class="lpnote" style="margin-top:0">
+            <span class="dotk" style="background:#b91c1c;border-radius:50%"></span> Severe
+            &nbsp;<span class="dotk" style="background:#ea580c;border-radius:50%"></span> Moderate
+            &nbsp;<span class="dotk" style="background:#eab308;border-radius:50%"></span> Minor
+          </div>
+          <div class="row" style="display:flex;gap:6px;align-items:center;margin:4px 0">
+            <input id="stormSearch" type="text" placeholder="filter by year, e.g. 2018"
+              style="flex:1;padding:5px 7px;border:1px solid var(--line,#dbe4ec);border-radius:7px;font-size:12px">
+            <select id="stormSev" style="padding:5px;border:1px solid var(--line,#dbe4ec);border-radius:7px;font-size:12px">
+              <option value="all">All</option><option value="severe">Severe</option>
+              <option value="moderate">Moderate+</option>
+            </select>
+          </div>
+          <div id="stormList" style="max-height:230px;overflow-y:auto;border:1px solid var(--line,#eef2f6);border-radius:8px"></div>
+          <div class="lpnote" id="stormNote">Pick a storm to map the streets that flooded that day.</div>
+          <div id="stormTimeline" style="display:none;margin-top:6px"></div>
+          <div class="lpnote srclegend" id="stormSrcLegend" style="display:none;margin-top:6px"></div>
+          <div id="stormRadar" style="display:none;margin-top:6px"></div>
+        </div>
+
+        <div class="lp-sec">Radar rainfall</div>
+        <label><input type="checkbox" id="lRadarLive"> Live radar (reflectivity)
+          <span class="info" title="Current NOAA NEXRAD base reflectivity (where it's raining now, green=light to red=intense), via Iowa Environmental Mesonet. Refreshes every few minutes.">i</span></label>
+        <label><input type="checkbox" id="lRadarMrms"> Live rainfall totals (MRMS, last 24 h)
+          <span class="info" title="NOAA MRMS radar-estimated rainfall accumulated over the past 24 hours (inches), via Iowa Environmental Mesonet.">i</span></label>
+        <div class="subs" id="radarSubs" style="display:none">
+          <div class="row" style="display:flex;gap:6px;align-items:center;margin:4px 0">
+            <span class="lpnote" style="margin:0">Opacity</span>
+            <input id="radarOpacity" type="range" min="20" max="100" step="5" value="75" style="flex:1">
+          </div>
+          <div class="lpnote" id="radarLegend"></div>
+          <div class="lpnote" id="radarStatus" style="color:#b4690a"></div>
+          <div class="lpnote">Source: NOAA NEXRAD / MRMS via Iowa Environmental Mesonet (free, no key).</div>
+        </div>
+
         <div class="lp-sec">Reported flooding (photos)</div>
         <label><input type="checkbox" id="lReports"><span class="dotk" style="background:#c026d3;border-radius:50%"></span> Validated flood photos
           <span class="info" title="Locations with real photos of past flooding (validated from social media & news). Click a point to see the photo(s); use the See all photos button when a location has more than one.">i</span></label>
@@ -175,7 +214,9 @@
         <label><input type="checkbox" id="lNoaa"><span class="dotk" style="background:#6d28d9;border-radius:50%"></span> NOAA/NWS weather (BWI, Harbor)
           <span class="info" title="Live NOAA/National Weather Service observations at BWI Airport, the Inner Harbor and Martin State. Click for current precipitation (inches, last 1/3/6 h), temperature, humidity and observation time. Updates live each time the app is opened.">i</span></label>
         <label><input type="checkbox" id="lUsgs"><span class="dotk" style="background:#0369a1;border-radius:50%"></span> USGS stream gauges (live)
-          <span class="info" title="Live USGS stream gauges inside the study area. Click a gauge for current gage height (ft) and streamflow with the reading time. Updates live each time the app is opened.">i</span></label>
+          <span class="info" title="Live USGS stream gauges inside the study area. Click a gauge for its current gage height (ft) and streamflow PLUS a 7-day graph of both. Updates live each time the app is opened.">i</span></label>
+        <label><input type="checkbox" id="lTide"><span class="dotk" style="background:#0e7490;border-radius:50%"></span> NOAA tide / water levels
+          <span class="info" title="NOAA Tides &amp; Currents water-level stations around Baltimore Harbor (Inner Harbor, Tolchester, Annapolis, Cambridge). Click a gauge for an inundation-style graph: observed water level + predicted tide, with the NWS minor/moderate/major flood thresholds. Keyless live data.">i</span></label>
 
         <div class="lp-sec">Buildings</div>
         <label><input type="checkbox" id="lBldg" checked> Building footprints
@@ -331,12 +372,13 @@
 <script src="data/geo.js"></script>
 <script src="data/streamgrid.js"></script>
 <script src="data/flood.js"></script>
-<script src="data/reports.js"></script>
+<script src="data/reports.js?v=v40"></script>
 <script src="data/cameras.js"></script>
 <script src="data/claims.js"></script>
 <script src="data/stations.js"></script>
-<script src="data/floodhist.js?v=v25"></script>
-<script src="data/streamcells.js?v=v25"></script>
-<script src="app.js?v=v25"></script>
+<script src="data/floodhist.js?v=v40"></script>
+<script src="data/streamcells.js?v=v40"></script>
+<script src="data/storms.js?v=v40"></script>
+<script src="app.js?v=v40"></script>
 </body>
 </html>

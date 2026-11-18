@@ -188,10 +188,27 @@
   font-size:11px;text-align:center;line-height:18px;box-shadow:0 1px 3px rgba(0,0,0,.45)}
 .noaapin{width:24px;height:24px;border-radius:50%;border:2px solid #fff;color:#fff;font-size:13px;
   text-align:center;line-height:20px;box-shadow:0 1px 3px rgba(0,0,0,.45)}
+.tidepin{width:24px;height:24px;border-radius:50%;border:2px solid #fff;background:#0e7490;color:#fff;
+  font-size:15px;font-weight:700;text-align:center;line-height:20px;box-shadow:0 1px 3px rgba(0,0,0,.45)}
 
 .floodtag{display:inline-block;margin-top:2px;padding:1px 7px;border-radius:9px;font-size:11px;font-weight:600;color:#fff}
 .floodtag-coastal{background:#2563eb}
 .floodtag-inland{background:#d97706}
+/* per-storm source markers + legend chips */
+.stormsrcpin{width:18px;height:18px;border-radius:50%;border:2px solid #fff;color:#fff;font-size:10px;font-weight:800;text-align:center;line-height:14px;box-shadow:0 1px 3px rgba(0,0,0,.5)}
+.stormsrcpin.fresh{width:22px;height:22px;line-height:18px;font-size:12px;border-color:#ffd23f;box-shadow:0 0 0 2px rgba(255,210,63,.7),0 1px 4px rgba(0,0,0,.5)}
+.srcchip{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;color:#fff;font-size:9px;font-weight:800;flex:0 0 auto}
+.srclegend{border-top:1px solid var(--line);padding-top:5px}
+/* source badge inside report popups */
+.srcbadge{display:inline-block;margin-top:2px;padding:1px 7px;border-radius:9px;font-size:10.5px;font-weight:700;color:#fff}
+.srcbadge-311{background:#ea580c}
+.srcbadge-mycoast{background:#0e7490}
+.srcbadge-social{background:#7c3aed}
+.srcbadge-photo{background:#c026d3}
+/* BWI rain-gauge marker shown on the storm timeline (raindrop on the point + label to the right) */
+.bwidiv{overflow:visible}
+.bwidrop{position:absolute;left:0;bottom:0;font-size:22px;line-height:1;filter:drop-shadow(0 1px 2px rgba(0,0,0,.55))}
+.bwitag{position:absolute;left:24px;bottom:7px;white-space:nowrap;background:#0f3d5c;color:#fff;font-size:11px;font-weight:700;letter-spacing:.2px;padding:2px 8px;border-radius:12px;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.45)}
   @media(max-width:860px){.mapcol{height:calc(100vh - 150px)}.side{width:260px}.lpanel{width:210px}}
   /* welcome portal */
   .wsheet{background:#fff;border-radius:14px;max-width:780px;width:100%;box-shadow:0 12px 40px rgba(0,0,0,.35);overflow:hidden;display:grid;grid-template-columns:1.15fr 1fr;min-height:400px}
